@@ -539,6 +539,9 @@ sequenceDiagram
     participant SM as Secrets Manager
     participant PROC as Processed Bucket
     participant FAIL as Failed Bucket
+    participant MSK as Amazon MSK
+    participant SUCCESS as processing.succeeded
+    participant FAILURE as processing.failed
 
     U->>S3: Multipart upload CSV file
     S3->>EB: Object Created event
@@ -551,10 +554,14 @@ sequenceDiagram
     SM-->>ECS: Inject secrets at startup
     ECS->>S3: Read raw CSV file
     ECS->>PROC: Write processed output
+    ECS->>MSK: Produce success record
+    MSK->>SUCCESS: Append to topic
     ECS-->>SFN: Task complete (success)
     SFN->>DDB: UpdateItem (Status = SUCCEEDED)
 
     Note over ECS,FAIL: On failure (after 2 retries)
+    ECS->>MSK: Produce failure record
+    MSK->>FAILURE: Append to topic
     ECS-->>SFN: Task failed
     SFN->>DDB: UpdateItem (Status = FAILED, FailureCause)
     SFN->>SFN: FailWorkflow
@@ -588,9 +595,9 @@ On success, the job status is updated to SUCCEEDED. On failure (after 2 retries 
 
 **4. Processing**
 
-The Fargate task reads the CSV file from the raw bucket, processes it, and writes output to either the processed bucket (success) or the failed bucket (failure). Secrets are injected at container startup by the ECS agent.
+The Fargate task reads the CSV file from the raw bucket, processes it, and writes output to either the processed bucket (success) or the failed bucket (failure). Additionally, the processor writes records to Amazon MSK topics for real-time downstream consumption. Secrets are injected at container startup by the ECS agent.
 
-*Why this design:* Fargate provides serverless container execution — no EC2 instances to manage. The processor is a black-box container maintained by a separate team. This separation of concerns means the infrastructure team does not need to understand CSV parsing logic, and the processor team does not need to understand infrastructure.
+*Why this design:* Fargate provides serverless container execution — no EC2 instances to manage. The processor is a black-box container maintained by a separate team. This separation of concerns means the infrastructure team does not need to understand CSV parsing logic, and the processor team does not need to understand infrastructure. MSK provides real-time streaming output without modifying the existing S3 batch pipeline.
 
 **5. Storage**
 
@@ -612,6 +619,12 @@ All buckets use customer-managed KMS encryption, versioning, and server access l
 
 *Why this design:* Monitoring is layered — CloudWatch for operational metrics, CloudTrail for audit, Macie for data security, and DynamoDB for business-level status. Each layer serves a different audience (operators, auditors, security teams).
 
+**7. Streaming Output**
+
+Records are published to MSK topics in real-time. Success records go to `processing.succeeded`, failure records go to `processing.failed`. Downstream consumers subscribe independently and process at their own pace.
+
+*Why this design:* MSK decouples processing from consumption. Multiple downstream services can subscribe to the same topics without affecting the processor. Kafka's 7-day retention enables replay and reprocessing without re-uploading files.
+
 ---
 
 ## Scalability
@@ -625,6 +638,7 @@ The platform scales horizontally by design. S3 handles millions of concurrent up
 - **Step Functions:** 25,000 concurrent executions. Can be increased via AWS support.
 - **Fargate:** 1,000 concurrent tasks per region (default). Can be increased via AWS support.
 - **DynamoDB:** PAY_PER_REQUEST mode scales automatically to thousands of reads/writes per second.
+- **MSK:** 3 brokers with configurable instance types. Scale by increasing broker count (must be multiple of 3) or upgrading instance type. Auto-scaling can be added for storage.
 
 ### Parallel Workloads
 
@@ -982,6 +996,8 @@ As the platform scales, consider these evolution paths:
 - **Cross-region replication:** Add S3 cross-region replication for disaster recovery.
 - **Data lake integration:** Route processed files to a centralized data lake (S3 + Athena/Glue) for analytical querying.
 - **Schema registry:** If CSV formats evolve, add a schema registry to validate file structure before processing.
+- **MSK topic expansion:** Add additional topics for different record types (e.g., `processing.warnings`, `processing.metrics`) as downstream consumption patterns mature.
+- **MSK Connect:** Add S3 sink connectors to automatically archive processed records to S3, or source connectors to ingest from external Kafka clusters.
 
 ---
 
