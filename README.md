@@ -51,7 +51,7 @@ Security reviews and manual checklists do not scale. Every security requirement 
 
 ### 6. Maintainability
 
-The infrastructure is defined in a single CDK stack with a small number of well-scoped source files. This is intentional. Premature modularization of a 600-line stack would add indirection without reducing complexity. The codebase is organized so that a new engineer can read the entire infrastructure definition in under an hour.
+The infrastructure is defined in a single CDK stack with a small number of well-scoped source files. This is intentional. Premature modularization of an 800-line stack would add indirection without reducing complexity. The codebase is organized so that a new engineer can read the entire infrastructure definition in under an hour.
 
 ---
 
@@ -855,8 +855,8 @@ Records auto-expire via TTL after the configured retention period.
 ├── bin/
 │   └── data-processing-infrastructure.ts  # CDK app entry point (16 lines)
 ├── lib/
-│   ├── data-processing-infrastructure-stack.ts  # Core stack definition (609 lines)
-│   └── deployment-config.ts          # Configuration resolver with validation (96 lines)
+│   ├── data-processing-infrastructure-stack.ts  # Core stack definition (786 lines)
+│   └── deployment-config.ts          # Configuration resolver with validation (132 lines)
 ├── policy/                           # OPA/Rego policy-as-code (7 files, 18 rules)
 │   ├── iam.rego                      # IAM least-privilege enforcement
 │   ├── s3.rego                       # S3 encryption, public access, versioning
@@ -866,7 +866,7 @@ Records auto-expire via TTL after the configured retention period.
 │   ├── compute.rego                  # ECS task definition requirements
 │   └── data.rego                     # DynamoDB PITR, SQS encryption, CloudTrail logging
 ├── test/
-│   └── data-processing-infrastructure.test.ts  # Jest test suite (15 tests, 466 lines)
+│   └── data-processing-infrastructure.test.ts  # Jest test suite (31 tests, 640 lines)
 ├── cdk.json                          # CDK configuration and feature flags
 ├── package.json                      # NPM dependencies and scripts
 ├── tsconfig.json                     # TypeScript compiler configuration
@@ -955,7 +955,7 @@ GitHub Actions runs a validation pipeline on every pull request and push to `mai
 
 1. **Install dependencies** — `npm ci`
 2. **Build** — TypeScript compilation
-3. **Test** — Jest test suite (25+ tests, sequential execution)
+3. **Test** — Jest test suite (31 tests, sequential execution)
 4. **CDK synth** — Synthesize CloudFormation template
 5. **OPA policy check** — Validate template against 18 security rules
 
