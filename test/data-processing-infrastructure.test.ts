@@ -494,7 +494,7 @@ test('MSK cluster uses KMS encryption at rest and TLS in transit', () => {
   template.hasResourceProperties('AWS::MSK::Cluster', {
     EncryptionInfo: Match.objectLike({
       EncryptionAtRest: Match.objectLike({
-        DataVolumeKmsKeyId: Match.anyValue(),
+        DataVolumeKMSKeyId: Match.anyValue(),
       }),
       EncryptionInTransit: Match.objectLike({
         ClientBroker: 'TLS',
@@ -525,10 +525,11 @@ test('MSK security group restricts access to VPC CIDR only', () => {
   const template = Template.fromStack(stack);
 
   const securityGroups = template.findResources('AWS::EC2::SecurityGroup');
-  const mskSg = Object.values(securityGroups).find((sg: any) =>
-    JSON.stringify(sg).includes('MskBroker')
+  const mskSgKey = Object.keys(securityGroups).find((key) =>
+    key.includes('MskBrokerSecurityGroup')
   );
-  expect(mskSg).toBeDefined();
+  expect(mskSgKey).toBeDefined();
+  const mskSg = securityGroups[mskSgKey!];
 
   const ingressRules = (mskSg as any).Properties?.SecurityGroupIngress || [];
   for (const rule of ingressRules) {
@@ -572,10 +573,10 @@ test('creates MSK broker CloudWatch log group', () => {
   const template = Template.fromStack(stack);
 
   const logGroups = template.findResources('AWS::Logs::LogGroup');
-  const mskLogGroup = Object.values(logGroups).find((lg: any) =>
-    JSON.stringify(lg).includes('MskBroker')
+  const mskLogGroupKey = Object.keys(logGroups).find((key) =>
+    key.includes('MskBrokerLogsLogGroup')
   );
-  expect(mskLogGroup).toBeDefined();
+  expect(mskLogGroupKey).toBeDefined();
 });
 
 test('creates Lambda function for MSK topic provisioning', () => {
