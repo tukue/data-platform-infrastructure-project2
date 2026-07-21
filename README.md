@@ -128,7 +128,7 @@ flowchart TB
 | **S3 (Raw)** | Receives uploaded CSV files. Triggers the processing pipeline via EventBridge notifications. | S3 provides durable, infinitely scalable object storage with native event notifications. Multipart upload support is critical for multi-GB files. |
 | **EventBridge** | Routes S3 `Object Created` events to Step Functions. Acts as the decoupling layer between upload and processing. | EventBridge provides content-based filtering, input transformation, built-in retry with retry queues, and no Lambda glue code. |
 | **Step Functions** | Orchestrates the end-to-end workflow: TTL calculation, job status tracking, Fargate task execution, success/failure handling. | Step Functions provides visual workflow debugging, native ECS integration (`runTask.sync`), built-in retry/catch, X-Ray tracing, and timeout enforcement — all without custom orchestration code. |
-| **ECS Fargate** | Executes the CSV processor container in an isolated, serverless compute environment. | Fargate eliminates EC2 instance management. Tasks run for 5-10 minutes, which is too long for Lambda but does not justify a persistent ECS service. One-off tasks are the natural fit. |
+| **ECS Fargate** | Executes the CSV processor container in an isolated, serverless compute environment. | Fargate eliminates EC2 instance management. The processor is a black-box container maintained by a separate team — Fargate runs it without adapting it to Lambda's execution model (handler, ephemeral storage limits, packaging constraints). One-off tasks are the natural fit for episodic workloads. |
 | **DynamoDB** | Stores job metadata (status, timestamps, failure cause) with TTL-based automatic cleanup. | DynamoDB provides single-digit-millisecond reads, PAY_PER_REQUEST billing for variable workloads, point-in-time recovery, and TTL for zero-cost cleanup of expired records. |
 | **KMS (3 keys)** | Customer-managed encryption keys for storage, operational, and secrets data tiers. | Separate keys per tier limit blast radius. If the storage key is compromised, operational data (logs, metadata) and secrets remain protected. |
 | **SQS** | Retry queue for EventBridge invocations that fail to start a state machine execution. | Provides bounded retry with 14-day retention, giving operators time to investigate and replay failed events. |
@@ -160,7 +160,7 @@ This section explains the reasoning behind every major architectural decision. E
 **Trade-offs:** The uploader cannot receive immediate confirmation that processing succeeded. A separate status query mechanism (DynamoDB job table) is needed for this use case.
 
 **Alternatives considered:**
-- *Lambda-based synchronous processing:* Rejected because processing duration (5-10 minutes) far exceeds Lambda's 15-minute timeout, and Lambda cold starts add unnecessary latency.
+- *Lambda-based synchronous processing:* Rejected because Lambda allocates CPU proportional to memory — achieving adequate CPU for CSV processing requires 3-10GB memory allocations, which is expensive for CPU-bound work. Additionally, the processor is a black-box container that would need adaptation to Lambda's execution model (handler entry point, ephemeral storage limits, deployment package constraints).
 - *SQS direct integration:* EventBridge was chosen over SQS because EventBridge provides content-based filtering, input transformation, and native Step Functions integration — reducing the need for Lambda consumers.
 
 ---
@@ -204,7 +204,7 @@ This section explains the reasoning behind every major architectural decision. E
 **Trade-offs:** Fargate tasks have a 10-minute vCPU/memory duration limit per task. Very large files that require more processing time would need architectural changes.
 
 **Alternatives considered:**
-- *Lambda:* Rejected due to 15-minute timeout and the complexity of fitting CSV processing into Lambda's execution model.
+- *Lambda:* Rejected because Lambda's CPU-to-memory proportionality makes it expensive for CPU-bound CSV processing, its ephemeral storage limits (512MB default) constrain large file handling, and the processor container would need adaptation to Lambda's execution model (handler entry point, packaging constraints).
 - *EC2-based ECS service:* Rejected because it requires instance management, auto-scaling configuration, and costs money even when idle.
 - *AWS Batch:* A viable alternative for future scaling, but adds operational complexity (job queues, compute environments, scheduling policies) that is not justified at current scale.
 
