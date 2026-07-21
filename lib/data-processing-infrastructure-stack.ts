@@ -370,7 +370,7 @@ export class DataProcessingInfrastructureStack extends cdk.Stack {
         }).subnetIds,
         securityGroups: [mskBrokerSecurityGroup.securityGroupId],
         storageInfo: {
-          eBSStorageInfo: {
+          ebsStorageInfo: {
             volumeSize: props.mskEBSVolumeSize,
           },
         },
@@ -509,7 +509,7 @@ def handler(event, context):
 
     container.addEnvironment('PROCESSED_BUCKET', processedFilesBucket.bucketName);
     container.addEnvironment('FAILED_BUCKET', failedFilesBucket.bucketName);
-    container.addEnvironment('MSK_BOOTSTRAP_SERVERS', mskCluster.attrBootstrapBrokerStringSaslIam);
+    container.addEnvironment('MSK_BOOTSTRAP_SERVERS', mskCluster.getAtt('BootstrapBrokerStringSaslIam').toString());
     container.addEnvironment('KAFKA_SUCCESS_TOPIC', props.mskSuccessTopic);
     container.addEnvironment('KAFKA_FAILURE_TOPIC', props.mskFailureTopic);
 
@@ -530,7 +530,7 @@ def handler(event, context):
     processedFilesBucket.grantWrite(taskDefinition.taskRole);
     failedFilesBucket.grantWrite(taskDefinition.taskRole);
 
-    taskDefinition.taskRole.addToPolicy(new iam.PolicyStatement({
+    taskDefinition.taskRole.addToPrincipalPolicy(new iam.PolicyStatement({
       actions: [
         'kafka-cluster:Connect',
         'kafka-cluster:DescribeTopic',
