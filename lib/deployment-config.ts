@@ -11,6 +11,14 @@ export interface DeploymentConfig {
   processorCpu: number;
   processorMemory: number;
   logRetentionDays: number;
+  mskClusterName: string;
+  mskInstanceType: string;
+  mskNumberOfBrokerNodes: number;
+  mskKafkaVersion: string;
+  mskEBSVolumeSize: number;
+  mskSuccessTopic: string;
+  mskFailureTopic: string;
+  mskRetentionHours: number;
 }
 
 const CDK_CONTEXT = 'tryGetContext' as const;
@@ -48,6 +56,14 @@ export function resolveDeploymentConfig(app: cdk.App): DeploymentConfig {
   const logRetentionDays = contextNumber(app, 'logRetentionDays', 'LOG_RETENTION_DAYS', '30');
   const processorImage = contextString(app, 'processorImage', 'PROCESSOR_IMAGE', '');
   const enrichmentApiCidrs = parseCidrs(app);
+  const mskClusterName = contextString(app, 'mskClusterName', 'MSK_CLUSTER_NAME', 'data-processing-streaming');
+  const mskInstanceType = contextString(app, 'mskInstanceType', 'MSK_INSTANCE_TYPE', 'kafka.m5.large');
+  const mskNumberOfBrokerNodes = contextNumber(app, 'mskNumberOfBrokerNodes', 'MSK_NUMBER_OF_BROKER_NODES', '3');
+  const mskKafkaVersion = contextString(app, 'mskKafkaVersion', 'MSK_KAFKA_VERSION', '3.6.1');
+  const mskEBSVolumeSize = contextNumber(app, 'mskEBSVolumeSize', 'MSK_EBS_VOLUME_SIZE', '100');
+  const mskSuccessTopic = contextString(app, 'mskSuccessTopic', 'MSK_SUCCESS_TOPIC', 'processing.succeeded');
+  const mskFailureTopic = contextString(app, 'mskFailureTopic', 'MSK_FAILURE_TOPIC', 'processing.failed');
+  const mskRetentionHours = contextNumber(app, 'mskRetentionHours', 'MSK_RETENTION_HOURS', '168');
 
   if (!Number.isInteger(rawFileRetentionDays) || rawFileRetentionDays < 1) {
     throw new Error('rawFileRetentionDays must be a positive integer.');
@@ -69,6 +85,18 @@ export function resolveDeploymentConfig(app: cdk.App): DeploymentConfig {
   }
   if (!Number.isInteger(logRetentionDays) || logRetentionDays < 1) {
     throw new Error('logRetentionDays must be a positive integer.');
+  }
+  if (!Number.isInteger(mskNumberOfBrokerNodes) || mskNumberOfBrokerNodes < 1) {
+    throw new Error('mskNumberOfBrokerNodes must be a positive integer.');
+  }
+  if (mskNumberOfBrokerNodes % 3 !== 0) {
+    throw new Error('mskNumberOfBrokerNodes must be a multiple of 3 (one per AZ).');
+  }
+  if (!Number.isInteger(mskEBSVolumeSize) || mskEBSVolumeSize < 1 || mskEBSVolumeSize > 16384) {
+    throw new Error('mskEBSVolumeSize must be an integer between 1 and 16384.');
+  }
+  if (!Number.isInteger(mskRetentionHours) || mskRetentionHours < 1) {
+    throw new Error('mskRetentionHours must be a positive integer.');
   }
 
   if (processorImage.length === 0) {
@@ -92,5 +120,13 @@ export function resolveDeploymentConfig(app: cdk.App): DeploymentConfig {
     processorCpu,
     processorMemory,
     logRetentionDays,
+    mskClusterName,
+    mskInstanceType,
+    mskNumberOfBrokerNodes,
+    mskKafkaVersion,
+    mskEBSVolumeSize,
+    mskSuccessTopic,
+    mskFailureTopic,
+    mskRetentionHours,
   };
 }

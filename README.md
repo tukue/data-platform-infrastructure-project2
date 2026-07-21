@@ -15,12 +15,13 @@ Organizations that ingest bulk data from upstream partners, internal systems, or
 **Core capabilities:**
 
 - Event-driven CSV file ingestion and processing via AWS Step Functions and ECS Fargate
+- Real-time streaming output to Amazon MSK (Apache Kafka) for downstream consumers
 - Per-file job tracking with automatic expiration and status auditing
 - Three-tier encryption with customer-managed KMS keys across all data domains
 - Policy-as-code enforcement through OPA/Rego in CI, validating every synthesized template against security guardrails
 - Configurable data retention, compute sizing, and network topology without source code changes
 
-**Key technologies:** AWS CDK v2 (TypeScript), Amazon S3, AWS Step Functions, Amazon ECS Fargate, Amazon DynamoDB, Amazon EventBridge, AWS KMS, Amazon Macie, AWS CloudTrail, Open Policy Agent.
+**Key technologies:** AWS CDK v2 (TypeScript), Amazon S3, AWS Step Functions, Amazon ECS Fargate, Amazon DynamoDB, Amazon EventBridge, Amazon MSK (Apache Kafka), AWS KMS, Amazon Macie, AWS CloudTrail, Open Policy Agent.
 
 ---
 
@@ -60,6 +61,7 @@ The infrastructure is defined in a single CDK stack with a small number of well-
 flowchart TB
     subgraph External
         user[Upstream System]
+        consumers[Downstream Consumers]
     end
 
     subgraph "AWS Account"
@@ -80,6 +82,18 @@ flowchart TB
             secrets[Secrets Manager<br/>KMS]
             sfn -->|runTask.sync| ecs
             ecs --> secrets
+        end
+
+        subgraph Streaming Output
+            msk[Amazon MSK<br/>Apache Kafka<br/>SASL/IAM · TLS]
+            successTopic[("processing.succeeded<br/>3 partitions · 7-day retention")]
+            failureTopic[("processing.failed<br/>3 partitions · 7-day retention")]
+            ecs -->|success records| msk
+            ecs -->|failure records| msk
+            msk --> successTopic
+            msk --> failureTopic
+            successTopic -->|consume| consumers
+            failureTopic -->|consume| consumers
         end
 
         subgraph Storage
@@ -112,6 +126,7 @@ flowchart TB
             endpoints[VPC Endpoints<br/>Secrets · Logs · ECR · SQS]
             vpc --> endpoints
             ecs -.-> vpc
+            msk -.-> vpc
         end
     end
 
@@ -132,6 +147,7 @@ flowchart TB
 | **DynamoDB** | Stores job metadata (status, timestamps, failure cause) with TTL-based automatic cleanup. | DynamoDB provides single-digit-millisecond reads, PAY_PER_REQUEST billing for variable workloads, point-in-time recovery, and TTL for zero-cost cleanup of expired records. |
 | **KMS (3 keys)** | Customer-managed encryption keys for storage, operational, and secrets data tiers. | Separate keys per tier limit blast radius. If the storage key is compromised, operational data (logs, metadata) and secrets remain protected. |
 | **SQS** | Retry queue for EventBridge invocations that fail to start a state machine execution. | Provides bounded retry with 14-day retention, giving operators time to investigate and replay failed events. |
+| **MSK** | Streaming output backbone. Processor writes success/failure records to Kafka topics for downstream consumers. | Provides real-time data streaming with SASL/IAM authentication, TLS encryption, and 7-day message retention. Decouples processing from consumption. |
 | **CloudTrail** | Object-level audit trail for all S3 data buckets. | Required for compliance and forensic investigation. Captures who accessed which object, when, and from where. |
 | **Macie** | Automated PII discovery across S3 buckets. Routes findings to CloudWatch Logs and SNS. | Provides continuous data security monitoring without custom scanning jobs. Findings are routed to operational alerting. |
 | **VPC + Endpoints** | Isolates processing tasks in private subnets. Interface endpoints keep AWS service traffic off the public internet. | Network isolation is a defense-in-depth measure. Even if IAM policies are misconfigured, tasks cannot reach the public internet. |
@@ -207,6 +223,32 @@ This section explains the reasoning behind every major architectural decision. E
 - *Lambda:* Rejected because Lambda's CPU-to-memory proportionality makes it expensive for CPU-bound CSV processing, its ephemeral storage limits (512MB default) constrain large file handling, and the processor container would need adaptation to Lambda's execution model (handler entry point, packaging constraints).
 - *EC2-based ECS service:* Rejected because it requires instance management, auto-scaling configuration, and costs money even when idle.
 - *AWS Batch:* A viable alternative for future scaling, but adds operational complexity (job queues, compute environments, scheduling policies) that is not justified at current scale.
+
+---
+
+### Amazon MSK as Streaming Output
+
+**Context:** The processor writes output to S3 for durable storage, but downstream services need real-time access to processed records. S3 is optimized for batch consumption, not streaming.
+
+**Decision:** Add Amazon MSK (Managed Streaming for Apache Kafka) as a streaming output backbone. The processor writes success/failure records to dedicated Kafka topics. Downstream consumers subscribe independently.
+
+**Why:** MSK provides real-time data streaming without modifying the existing S3 pipeline. Kafka's consumer model allows multiple downstream services to subscribe independently, replay messages, and process records at their own pace. SASL/IAM authentication eliminates password management.
+
+**Benefits:**
+- **Decoupled consumers** — downstream services subscribe to topics independently
+- **Replay capability** — Kafka retains messages for 7 days, enabling reprocessing
+- **Real-time access** — consumers get processed records within seconds
+- **No pipeline changes** — the existing S3 batch pipeline remains untouched
+
+**Trade-offs:**
+- MSK adds ~$245/month baseline cost (3 brokers + storage)
+- The processor needs a Kafka producer library in the container image
+- Topic configuration is static (CDK-defined) — dynamic topics require application logic
+
+**Alternatives considered:**
+- *Kafka Connect S3 sink:* Rejected because it adds latency (polling S3) and complexity (connector management).
+- *SQS for streaming:* Rejected because SQS is pull-based, has message limits, and lacks replay capability.
+- *Kinesis Data Streams:* Considered, but Kafka provides better ecosystem compatibility and consumer group semantics.
 
 ---
 
@@ -497,6 +539,9 @@ sequenceDiagram
     participant SM as Secrets Manager
     participant PROC as Processed Bucket
     participant FAIL as Failed Bucket
+    participant MSK as Amazon MSK
+    participant SUCCESS as processing.succeeded
+    participant FAILURE as processing.failed
 
     U->>S3: Multipart upload CSV file
     S3->>EB: Object Created event
@@ -509,10 +554,14 @@ sequenceDiagram
     SM-->>ECS: Inject secrets at startup
     ECS->>S3: Read raw CSV file
     ECS->>PROC: Write processed output
+    ECS->>MSK: Produce success record
+    MSK->>SUCCESS: Append to topic
     ECS-->>SFN: Task complete (success)
     SFN->>DDB: UpdateItem (Status = SUCCEEDED)
 
     Note over ECS,FAIL: On failure (after 2 retries)
+    ECS->>MSK: Produce failure record
+    MSK->>FAILURE: Append to topic
     ECS-->>SFN: Task failed
     SFN->>DDB: UpdateItem (Status = FAILED, FailureCause)
     SFN->>SFN: FailWorkflow
@@ -546,9 +595,9 @@ On success, the job status is updated to SUCCEEDED. On failure (after 2 retries 
 
 **4. Processing**
 
-The Fargate task reads the CSV file from the raw bucket, processes it, and writes output to either the processed bucket (success) or the failed bucket (failure). Secrets are injected at container startup by the ECS agent.
+The Fargate task reads the CSV file from the raw bucket, processes it, and writes output to either the processed bucket (success) or the failed bucket (failure). Additionally, the processor writes records to Amazon MSK topics for real-time downstream consumption. Secrets are injected at container startup by the ECS agent.
 
-*Why this design:* Fargate provides serverless container execution — no EC2 instances to manage. The processor is a black-box container maintained by a separate team. This separation of concerns means the infrastructure team does not need to understand CSV parsing logic, and the processor team does not need to understand infrastructure.
+*Why this design:* Fargate provides serverless container execution — no EC2 instances to manage. The processor is a black-box container maintained by a separate team. This separation of concerns means the infrastructure team does not need to understand CSV parsing logic, and the processor team does not need to understand infrastructure. MSK provides real-time streaming output without modifying the existing S3 batch pipeline.
 
 **5. Storage**
 
@@ -570,6 +619,12 @@ All buckets use customer-managed KMS encryption, versioning, and server access l
 
 *Why this design:* Monitoring is layered — CloudWatch for operational metrics, CloudTrail for audit, Macie for data security, and DynamoDB for business-level status. Each layer serves a different audience (operators, auditors, security teams).
 
+**7. Streaming Output**
+
+Records are published to MSK topics in real-time. Success records go to `processing.succeeded`, failure records go to `processing.failed`. Downstream consumers subscribe independently and process at their own pace.
+
+*Why this design:* MSK decouples processing from consumption. Multiple downstream services can subscribe to the same topics without affecting the processor. Kafka's 7-day retention enables replay and reprocessing without re-uploading files.
+
 ---
 
 ## Scalability
@@ -583,6 +638,7 @@ The platform scales horizontally by design. S3 handles millions of concurrent up
 - **Step Functions:** 25,000 concurrent executions. Can be increased via AWS support.
 - **Fargate:** 1,000 concurrent tasks per region (default). Can be increased via AWS support.
 - **DynamoDB:** PAY_PER_REQUEST mode scales automatically to thousands of reads/writes per second.
+- **MSK:** 3 brokers with configurable instance types. Scale by increasing broker count (must be multiple of 3) or upgrading instance type. Auto-scaling can be added for storage.
 
 ### Parallel Workloads
 
@@ -731,6 +787,15 @@ All keys have automatic rotation enabled and `RETAIN` removal policy (prevents a
 - Digest-pinned images (no mutable tags)
 - No privileged mode
 
+### MSK Security
+
+- **SASL/IAM authentication** — uses AWS IAM roles, no password management
+- **TLS encryption** — all client-broker and inter-broker communication encrypted
+- **Encryption at rest** — dedicated KMS key for broker volumes
+- **Unauthenticated access disabled** — no anonymous connections allowed
+- **Security group isolation** — brokers accessible only from task security group on port 9098
+- **Broker logs** — CloudWatch Logs for operational monitoring and audit
+
 ---
 
 ## Observability
@@ -743,6 +808,7 @@ All keys have automatic rotation enabled and `RETAIN` removal policy (prevents a
 | Step Functions executions | CloudWatch Logs (encrypted) | Orchestration state transitions and errors |
 | CloudTrail S3 data events | CloudWatch Logs (encrypted) | Object-level audit trail |
 | Macie findings | CloudWatch Logs + SNS | PII and data security alerts |
+| MSK broker logs | CloudWatch Logs (encrypted) | Kafka cluster health and operations |
 
 All log groups are encrypted with the operational KMS key and have configurable retention (default: 30 days).
 
@@ -874,6 +940,14 @@ All configuration is available through CDK context (`-c key=value`) or environme
 | Processor CPU | `processorCpu` | `PROCESSOR_CPU` | 1024 | Fargate CPU units (256 increments) |
 | Processor memory | `processorMemory` | `PROCESSOR_MEMORY` | 2048 | Fargate memory in MiB (512 increments) |
 | Log retention | `logRetentionDays` | `LOG_RETENTION_DAYS` | 30 | CloudWatch Logs retention in days |
+| MSK cluster name | `mskClusterName` | `MSK_CLUSTER_NAME` | data-processing-streaming | MSK cluster identifier |
+| MSK instance type | `mskInstanceType` | `MSK_INSTANCE_TYPE` | kafka.m5.large | Broker instance type |
+| MSK broker nodes | `mskNumberOfBrokerNodes` | `MSK_NUMBER_OF_BROKER_NODES` | 3 | Number of broker nodes (must be multiple of 3) |
+| MSK Kafka version | `mskKafkaVersion` | `MSK_KAFKA_VERSION` | 3.6.1 | Apache Kafka version |
+| MSK EBS volume size | `mskEBSVolumeSize` | `MSK_EBS_VOLUME_SIZE` | 100 | GB per broker (1-16384) |
+| MSK success topic | `mskSuccessTopic` | `MSK_SUCCESS_TOPIC` | processing.succeeded | Topic for successful processing records |
+| MSK failure topic | `mskFailureTopic` | `MSK_FAILURE_TOPIC` | processing.failed | Topic for failed processing records |
+| MSK retention hours | `mskRetentionHours` | `MSK_RETENTION_HOURS` | 168 | Message retention in hours (7 days) |
 
 ### CI/CD Pipeline
 
@@ -881,7 +955,7 @@ GitHub Actions runs a validation pipeline on every pull request and push to `mai
 
 1. **Install dependencies** — `npm ci`
 2. **Build** — TypeScript compilation
-3. **Test** — Jest test suite (15 tests, sequential execution)
+3. **Test** — Jest test suite (25+ tests, sequential execution)
 4. **CDK synth** — Synthesize CloudFormation template
 5. **OPA policy check** — Validate template against 18 security rules
 
@@ -922,6 +996,8 @@ As the platform scales, consider these evolution paths:
 - **Cross-region replication:** Add S3 cross-region replication for disaster recovery.
 - **Data lake integration:** Route processed files to a centralized data lake (S3 + Athena/Glue) for analytical querying.
 - **Schema registry:** If CSV formats evolve, add a schema registry to validate file structure before processing.
+- **MSK topic expansion:** Add additional topics for different record types (e.g., `processing.warnings`, `processing.metrics`) as downstream consumption patterns mature.
+- **MSK Connect:** Add S3 sink connectors to automatically archive processed records to S3, or source connectors to ingest from external Kafka clusters.
 
 ---
 

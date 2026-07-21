@@ -10,6 +10,7 @@ import * as kms from 'aws-cdk-lib/aws-kms';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as macie from 'aws-cdk-lib/aws-macie';
+import * as msk from 'aws-cdk-lib/aws-msk';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as sns from 'aws-cdk-lib/aws-sns';
@@ -28,6 +29,14 @@ export interface DataProcessingInfrastructureStackProps extends cdk.StackProps {
   processorCpu: number;
   processorMemory: number;
   logRetentionDays: number;
+  mskClusterName: string;
+  mskInstanceType: string;
+  mskNumberOfBrokerNodes: number;
+  mskKafkaVersion: string;
+  mskEBSVolumeSize: number;
+  mskSuccessTopic: string;
+  mskFailureTopic: string;
+  mskRetentionHours: number;
 }
 
 function cdkLogRetention(days: number): logs.RetentionDays {
@@ -69,6 +78,13 @@ export class DataProcessingInfrastructureStack extends cdk.Stack {
     const secretsKey = new kms.Key(this, 'SecretsKey', {
       alias: 'alias/data-processing-secrets',
       description: 'Encrypts Secrets Manager secrets.',
+      enableKeyRotation: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    const mskKey = new kms.Key(this, 'MskKey', {
+      alias: 'alias/data-processing-msk',
+      description: 'Encrypts MSK broker volumes.',
       enableKeyRotation: true,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
@@ -290,6 +306,152 @@ export class DataProcessingInfrastructureStack extends cdk.Stack {
       );
     }
 
+    const mskBrokerLogsLogGroup = new logs.LogGroup(this, 'MskBrokerLogsLogGroup', {
+      encryptionKey: operationalKey,
+      retention: logRetention,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    const mskBrokerSecurityGroup = new ec2.SecurityGroup(this, 'MskBrokerSecurityGroup', {
+      vpc,
+      allowAllOutbound: false,
+      description: 'Controls network access to MSK broker nodes.',
+    });
+    mskBrokerSecurityGroup.addIngressRule(
+      taskSecurityGroup,
+      ec2.Port.tcp(9098),
+      'Allow Kafka IAM auth from processor tasks.',
+    );
+    mskBrokerSecurityGroup.addIngressRule(
+      ec2.Peer.ipv4(vpc.vpcCidrBlock),
+      ec2.Port.tcp(9092),
+      'Allow inter-broker communication (plaintext).',
+    );
+    mskBrokerSecurityGroup.addIngressRule(
+      ec2.Peer.ipv4(vpc.vpcCidrBlock),
+      ec2.Port.tcp(9094),
+      'Allow inter-broker communication (TLS).',
+    );
+    mskBrokerSecurityGroup.addIngressRule(
+      ec2.Peer.ipv4(vpc.vpcCidrBlock),
+      ec2.Port.tcp(9098),
+      'Allow inter-broker communication (IAM).',
+    );
+    mskBrokerSecurityGroup.addEgressRule(
+      ec2.Peer.ipv4(vpc.vpcCidrBlock),
+      ec2.Port.tcp(53),
+      'Allow DNS over TCP to the VPC resolver.',
+    );
+    mskBrokerSecurityGroup.addEgressRule(
+      ec2.Peer.ipv4(vpc.vpcCidrBlock),
+      ec2.Port.udp(53),
+      'Allow DNS over UDP to the VPC resolver.',
+    );
+    mskBrokerSecurityGroup.addEgressRule(
+      ec2.Peer.ipv4(vpc.vpcCidrBlock),
+      ec2.Port.tcp(443),
+      'Allow HTTPS to VPC CIDR for AWS service access.',
+    );
+
+    taskSecurityGroup.addEgressRule(
+      mskBrokerSecurityGroup,
+      ec2.Port.tcp(9098),
+      'Allow Kafka IAM auth to MSK brokers.',
+    );
+
+    const mskCluster = new msk.CfnCluster(this, 'StreamingCluster', {
+      clusterName: props.mskClusterName,
+      kafkaVersion: props.mskKafkaVersion,
+      numberOfBrokerNodes: props.mskNumberOfBrokerNodes,
+      brokerNodeGroupInfo: {
+        instanceType: props.mskInstanceType,
+        clientSubnets: vpc.selectSubnets({
+          subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+        }).subnetIds,
+        securityGroups: [mskBrokerSecurityGroup.securityGroupId],
+        storageInfo: {
+          ebsStorageInfo: {
+            volumeSize: props.mskEBSVolumeSize,
+          },
+        },
+      },
+      encryptionInfo: {
+        encryptionAtRest: {
+          dataVolumeKmsKeyId: mskKey.keyArn,
+        },
+        encryptionInTransit: {
+          clientBroker: 'TLS',
+          inCluster: true,
+        },
+      },
+      clientAuthentication: {
+        sasl: {
+          iam: { enabled: true },
+        },
+        unauthenticated: { enabled: false },
+      },
+      enhancedMonitoring: 'DEFAULT',
+      loggingInfo: {
+        brokerLogs: {
+          cloudWatchLogs: {
+            enabled: true,
+            logGroup: mskBrokerLogsLogGroup.logGroupName,
+          },
+        },
+      },
+    });
+
+    const mskTopicProviderFunction = new lambda.Function(this, 'MskTopicProviderFunction', {
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'index.handler',
+      code: lambda.Code.fromInline(`
+import json
+import os
+import urllib3
+
+def handler(event, context):
+    msk = __import__('boto3').client('kafka')
+    cluster_arn = event['ResourceProperties']['ClusterArn']
+    topics = event['ResourceProperties']['Topics']
+    retention_ms = event['ResourceProperties']['RetentionMs']
+
+    if event['RequestType'] == 'Delete':
+        return {'PhysicalResourceId': 'msk-topics'}
+
+    desc = msk.describe_cluster(ClusterArn=cluster_arn)
+    bootstrap = desc['ClusterInfo']['BootstrapBrokerStringSaslIam']
+    if not bootstrap:
+        raise Exception('Could not retrieve bootstrap servers')
+
+    brokers = bootstrap.split(',')[0].split(':')[0]
+    port = bootstrap.split(':')[1].split('/')[0] if ':' in bootstrap.split(',')[1] else '9098'
+
+    return {'PhysicalResourceId': 'msk-topics'}
+      `),
+      environment: {
+        MSK_CLUSTER_ARN: mskCluster.attrArn,
+      },
+      timeout: cdk.Duration.minutes(2),
+      vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [mskBrokerSecurityGroup],
+    });
+
+    mskTopicProviderFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['kafka-cluster:Connect', 'kafka-cluster:DescribeCluster'],
+      resources: [mskCluster.attrArn],
+    }));
+
+    const mskTopicCustomResource = new cdk.CustomResource(this, 'MskTopics', {
+      serviceToken: mskTopicProviderFunction.functionArn,
+      properties: {
+        ClusterArn: mskCluster.attrArn,
+        Topics: [props.mskSuccessTopic, props.mskFailureTopic],
+        RetentionMs: props.mskRetentionHours * 60 * 60 * 1000,
+      },
+    });
+    mskTopicCustomResource.node.addDependency(mskCluster);
+
     const cluster = new ecs.Cluster(this, 'ProcessingCluster', {
       vpc,
     });
@@ -347,6 +509,9 @@ export class DataProcessingInfrastructureStack extends cdk.Stack {
 
     container.addEnvironment('PROCESSED_BUCKET', processedFilesBucket.bucketName);
     container.addEnvironment('FAILED_BUCKET', failedFilesBucket.bucketName);
+    container.addEnvironment('MSK_BOOTSTRAP_SERVERS', mskCluster.getAtt('BootstrapBrokerStringSaslIam').toString());
+    container.addEnvironment('KAFKA_SUCCESS_TOPIC', props.mskSuccessTopic);
+    container.addEnvironment('KAFKA_FAILURE_TOPIC', props.mskFailureTopic);
 
     container.addSecret('DATABASE_CREDENTIALS', ecs.Secret.fromSecretsManager(databaseCredentials));
     container.addSecret('EXTERNAL_API_CREDENTIALS', ecs.Secret.fromSecretsManager(externalApiKey));
@@ -364,6 +529,18 @@ export class DataProcessingInfrastructureStack extends cdk.Stack {
     rawUploadsBucket.grantRead(taskDefinition.taskRole);
     processedFilesBucket.grantWrite(taskDefinition.taskRole);
     failedFilesBucket.grantWrite(taskDefinition.taskRole);
+
+    taskDefinition.taskRole.addToPrincipalPolicy(new iam.PolicyStatement({
+      actions: [
+        'kafka-cluster:Connect',
+        'kafka-cluster:DescribeTopic',
+        'kafka-cluster:WriteData',
+        'kafka-cluster:ReadData',
+        'kafka-cluster:DescribeGroup',
+        'kafka-cluster:AlterGroup',
+      ],
+      resources: [mskCluster.attrArn],
+    }));
 
     const denyNonTaskRoleAccess = (bucket: s3.Bucket, actions: string[]) =>
       bucket.addToResourcePolicy(

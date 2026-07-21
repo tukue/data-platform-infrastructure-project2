@@ -16,6 +16,14 @@ const defaultProps = {
   processorCpu: 1024,
   processorMemory: 2048,
   logRetentionDays: 30,
+  mskClusterName: 'test-streaming',
+  mskInstanceType: 'kafka.m5.large',
+  mskNumberOfBrokerNodes: 3,
+  mskKafkaVersion: '3.6.1',
+  mskEBSVolumeSize: 100,
+  mskSuccessTopic: 'processing.succeeded',
+  mskFailureTopic: 'processing.failed',
+  mskRetentionHours: 168,
 };
 
 test('creates secured buckets, ECS task, and workflow trigger', () => {
@@ -463,4 +471,170 @@ test('creates SQS VPC endpoint', () => {
     (ep: any) => JSON.stringify(ep).includes('sqs'),
   );
   expect(sqsEndpoints.length).toBeGreaterThanOrEqual(1);
+});
+
+test('creates MSK cluster with correct properties', () => {
+  const app = new cdk.App();
+  const stack = new DataProcessingInfrastructure.DataProcessingInfrastructureStack(app, 'MskClusterTest', defaultProps);
+  const template = Template.fromStack(stack);
+
+  template.resourceCountIs('AWS::MSK::Cluster', 1);
+  template.hasResourceProperties('AWS::MSK::Cluster', {
+    ClusterName: 'test-streaming',
+    KafkaVersion: '3.6.1',
+    NumberOfBrokerNodes: 3,
+  });
+});
+
+test('MSK cluster uses KMS encryption at rest and TLS in transit', () => {
+  const app = new cdk.App();
+  const stack = new DataProcessingInfrastructure.DataProcessingInfrastructureStack(app, 'MskEncryptionTest', defaultProps);
+  const template = Template.fromStack(stack);
+
+  template.hasResourceProperties('AWS::MSK::Cluster', {
+    EncryptionInfo: Match.objectLike({
+      EncryptionAtRest: Match.objectLike({
+        DataVolumeKMSKeyId: Match.anyValue(),
+      }),
+      EncryptionInTransit: Match.objectLike({
+        ClientBroker: 'TLS',
+        InCluster: true,
+      }),
+    }),
+  });
+});
+
+test('MSK cluster enables SASL/IAM and disables unauthenticated access', () => {
+  const app = new cdk.App();
+  const stack = new DataProcessingInfrastructure.DataProcessingInfrastructureStack(app, 'MskAuthTest', defaultProps);
+  const template = Template.fromStack(stack);
+
+  template.hasResourceProperties('AWS::MSK::Cluster', {
+    ClientAuthentication: Match.objectLike({
+      Sasl: Match.objectLike({
+        Iam: Match.objectLike({ Enabled: true }),
+      }),
+      Unauthenticated: Match.objectLike({ Enabled: false }),
+    }),
+  });
+});
+
+test('MSK security group restricts access to VPC CIDR only', () => {
+  const app = new cdk.App();
+  const stack = new DataProcessingInfrastructure.DataProcessingInfrastructureStack(app, 'MskSgTest', defaultProps);
+  const template = Template.fromStack(stack);
+
+  const securityGroups = template.findResources('AWS::EC2::SecurityGroup');
+  const mskSgKey = Object.keys(securityGroups).find((key) =>
+    key.includes('MskBrokerSecurityGroup')
+  );
+  expect(mskSgKey).toBeDefined();
+  const mskSg = securityGroups[mskSgKey!];
+
+  const ingressRules = (mskSg as any).Properties?.SecurityGroupIngress || [];
+  for (const rule of ingressRules) {
+    if (rule.CidrIp) {
+      expect(rule.CidrIp).not.toBe('0.0.0.0/0');
+    }
+  }
+});
+
+test('ECS task includes MSK bootstrap and topic environment variables', () => {
+  const app = new cdk.App();
+  const stack = new DataProcessingInfrastructure.DataProcessingInfrastructureStack(app, 'MskEnvTest', defaultProps);
+  const template = Template.fromStack(stack);
+
+  template.hasResourceProperties('AWS::ECS::TaskDefinition', {
+    ContainerDefinitions: Match.arrayWith([
+      Match.objectLike({
+        Environment: Match.arrayWith([
+          Match.objectLike({ Name: 'KAFKA_SUCCESS_TOPIC', Value: 'processing.succeeded' }),
+          Match.objectLike({ Name: 'KAFKA_FAILURE_TOPIC', Value: 'processing.failed' }),
+        ]),
+      }),
+    ]),
+  });
+});
+
+test('task role includes Kafka IAM permissions', () => {
+  const app = new cdk.App();
+  const stack = new DataProcessingInfrastructure.DataProcessingInfrastructureStack(app, 'MskIamTest', defaultProps);
+  const template = Template.fromStack(stack);
+
+  const synthesized = JSON.stringify(template.toJSON());
+  expect(synthesized).toContain('kafka-cluster:Connect');
+  expect(synthesized).toContain('kafka-cluster:DescribeTopic');
+  expect(synthesized).toContain('kafka-cluster:WriteData');
+});
+
+test('creates MSK broker CloudWatch log group', () => {
+  const app = new cdk.App();
+  const stack = new DataProcessingInfrastructure.DataProcessingInfrastructureStack(app, 'MskLogGroupTest', defaultProps);
+  const template = Template.fromStack(stack);
+
+  const logGroups = template.findResources('AWS::Logs::LogGroup');
+  const mskLogGroupKey = Object.keys(logGroups).find((key) =>
+    key.includes('MskBrokerLogsLogGroup')
+  );
+  expect(mskLogGroupKey).toBeDefined();
+});
+
+test('creates Lambda function for MSK topic provisioning', () => {
+  const app = new cdk.App();
+  const stack = new DataProcessingInfrastructure.DataProcessingInfrastructureStack(app, 'MskTopicProviderTest', defaultProps);
+  const template = Template.fromStack(stack);
+
+  const functions = template.findResources('AWS::Lambda::Function');
+  const topicProvider = Object.values(functions).find((fn: any) =>
+    JSON.stringify(fn).includes('MskTopicProvider')
+  );
+  expect(topicProvider).toBeDefined();
+});
+
+test('rejects invalid MSK broker node count', () => {
+  const app = new cdk.App();
+  const prevEnv = { ...process.env };
+  Object.assign(process.env, {
+    PROCESSOR_IMAGE: TEST_PROCESSOR_IMAGE,
+    MSK_NUMBER_OF_BROKER_NODES: '2',
+  });
+  expect(() => resolveDeploymentConfig(app)).toThrow(
+    'mskNumberOfBrokerNodes must be a multiple of 3',
+  );
+  process.env = prevEnv;
+});
+
+test('rejects invalid MSK EBS volume size', () => {
+  const app = new cdk.App();
+  const prevEnv = { ...process.env };
+  Object.assign(process.env, {
+    PROCESSOR_IMAGE: TEST_PROCESSOR_IMAGE,
+    MSK_EBS_VOLUME_SIZE: '0',
+  });
+  expect(() => resolveDeploymentConfig(app)).toThrow(
+    'mskEBSVolumeSize must be an integer between 1 and 16384',
+  );
+  process.env = prevEnv;
+});
+
+test('resolves MSK configuration from environment', () => {
+  const app = new cdk.App();
+  const prevEnv = { ...process.env };
+  Object.assign(process.env, {
+    PROCESSOR_IMAGE: TEST_PROCESSOR_IMAGE,
+    MSK_CLUSTER_NAME: 'custom-cluster',
+    MSK_INSTANCE_TYPE: 'kafka.m5.xlarge',
+    MSK_NUMBER_OF_BROKER_NODES: '6',
+    MSK_SUCCESS_TOPIC: 'custom.success',
+    MSK_FAILURE_TOPIC: 'custom.failure',
+  });
+
+  const config = resolveDeploymentConfig(app);
+  expect(config.mskClusterName).toBe('custom-cluster');
+  expect(config.mskInstanceType).toBe('kafka.m5.xlarge');
+  expect(config.mskNumberOfBrokerNodes).toBe(6);
+  expect(config.mskSuccessTopic).toBe('custom.success');
+  expect(config.mskFailureTopic).toBe('custom.failure');
+
+  process.env = prevEnv;
 });
