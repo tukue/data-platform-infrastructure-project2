@@ -128,10 +128,10 @@ flowchart TB
 | **S3 (Raw)** | Receives uploaded CSV files. Triggers the processing pipeline via EventBridge notifications. | S3 provides durable, infinitely scalable object storage with native event notifications. Multipart upload support is critical for multi-GB files. |
 | **EventBridge** | Routes S3 `Object Created` events to Step Functions. Acts as the decoupling layer between upload and processing. | EventBridge provides content-based filtering, input transformation, built-in retry with retry queues, and no Lambda glue code. |
 | **Step Functions** | Orchestrates the end-to-end workflow: TTL calculation, job status tracking, Fargate task execution, success/failure handling. | Step Functions provides visual workflow debugging, native ECS integration (`runTask.sync`), built-in retry/catch, X-Ray tracing, and timeout enforcement — all without custom orchestration code. |
-| **ECS Fargate** | Executes the CSV processor container in an isolated, serverless compute environment. | Fargate eliminates EC2 instance management. Tasks run for 5-10 minutes, which is too long for Lambda but does not justify a persistent ECS service. One-off tasks are the natural fit. |
+| **ECS Fargate** | Executes the CSV processor container in an isolated, serverless compute environment. | Fargate eliminates EC2 instance management. The processor is a black-box container maintained by a separate team — Fargate runs it without adapting it to Lambda's execution model (handler, ephemeral storage limits, packaging constraints). One-off tasks are the natural fit for episodic workloads. |
 | **DynamoDB** | Stores job metadata (status, timestamps, failure cause) with TTL-based automatic cleanup. | DynamoDB provides single-digit-millisecond reads, PAY_PER_REQUEST billing for variable workloads, point-in-time recovery, and TTL for zero-cost cleanup of expired records. |
 | **KMS (3 keys)** | Customer-managed encryption keys for storage, operational, and secrets data tiers. | Separate keys per tier limit blast radius. If the storage key is compromised, operational data (logs, metadata) and secrets remain protected. |
-| **SQS** | Dead-letter queue for EventBridge invocations that fail to start a state machine execution. | Provides bounded retry with 14-day retention, giving operators time to investigate and replay failed events. |
+| **SQS** | Retry queue for EventBridge invocations that fail to start a state machine execution. | Provides bounded retry with 14-day retention, giving operators time to investigate and replay failed events. |
 | **CloudTrail** | Object-level audit trail for all S3 data buckets. | Required for compliance and forensic investigation. Captures who accessed which object, when, and from where. |
 | **Macie** | Automated PII discovery across S3 buckets. Routes findings to CloudWatch Logs and SNS. | Provides continuous data security monitoring without custom scanning jobs. Findings are routed to operational alerting. |
 | **VPC + Endpoints** | Isolates processing tasks in private subnets. Interface endpoints keep AWS service traffic off the public internet. | Network isolation is a defense-in-depth measure. Even if IAM policies are misconfigured, tasks cannot reach the public internet. |
@@ -160,7 +160,7 @@ This section explains the reasoning behind every major architectural decision. E
 **Trade-offs:** The uploader cannot receive immediate confirmation that processing succeeded. A separate status query mechanism (DynamoDB job table) is needed for this use case.
 
 **Alternatives considered:**
-- *Lambda-based synchronous processing:* Rejected because processing duration (5-10 minutes) far exceeds Lambda's 15-minute timeout, and Lambda cold starts add unnecessary latency.
+- *Lambda-based synchronous processing:* Rejected because Lambda allocates CPU proportional to memory — achieving adequate CPU for CSV processing requires 3-10GB memory allocations, which is expensive for CPU-bound work. Additionally, the processor is a black-box container that would need adaptation to Lambda's execution model (handler entry point, ephemeral storage limits, deployment package constraints).
 - *SQS direct integration:* EventBridge was chosen over SQS because EventBridge provides content-based filtering, input transformation, and native Step Functions integration — reducing the need for Lambda consumers.
 
 ---
@@ -204,7 +204,7 @@ This section explains the reasoning behind every major architectural decision. E
 **Trade-offs:** Fargate tasks have a 10-minute vCPU/memory duration limit per task. Very large files that require more processing time would need architectural changes.
 
 **Alternatives considered:**
-- *Lambda:* Rejected due to 15-minute timeout and the complexity of fitting CSV processing into Lambda's execution model.
+- *Lambda:* Rejected because Lambda's CPU-to-memory proportionality makes it expensive for CPU-bound CSV processing, its ephemeral storage limits (512MB default) constrain large file handling, and the processor container would need adaptation to Lambda's execution model (handler entry point, packaging constraints).
 - *EC2-based ECS service:* Rejected because it requires instance management, auto-scaling configuration, and costs money even when idle.
 - *AWS Batch:* A viable alternative for future scaling, but adds operational complexity (job queues, compute environments, scheduling policies) that is not justified at current scale.
 
@@ -752,7 +752,7 @@ All log groups are encrypted with the operational KMS key and have configurable 
 - **DynamoDB:** Read/write capacity consumed, throttled requests.
 - **ECS:** CPU/memory utilization, task count, running tasks.
 - **S3:** Bucket size, number of objects, request metrics.
-- **SQS:** Message count, age of oldest message, DLQ depth.
+- **SQS:** Message count, age of oldest message, retry queue depth.
 
 ### Distributed Tracing
 
@@ -767,7 +767,7 @@ This provides end-to-end visibility into the processing pipeline's performance.
 
 - **Macie findings:** Routed to an SNS topic for operational alerting. The SNS topic can be subscribed to Slack, PagerDuty, or email.
 - **Step Functions failures:** Failed executions can be monitored via CloudWatch Alarms on the `ExecutionsFailed` metric.
-- **SQS DLQ depth:** A non-zero DLQ depth indicates events that failed to start state machine executions.
+- **SQS retry queue depth:** A non-zero retry queue depth indicates events that failed to start state machine executions.
 
 ### Operational Health Monitoring
 
@@ -908,7 +908,7 @@ The pipeline uses minimal permissions (`contents: read` only) and does not deplo
 
 1. **GitHub OIDC for deployment:** Replace long-lived AWS access keys with GitHub OIDC and short-lived STS credentials for CI/CD deployments.
 2. **User-facing job API:** Expose a REST API over the DynamoDB job table for progress tracking and retry visibility.
-3. **Operational alerts:** Add CloudWatch Alarms for failed Step Functions executions and SQS DLQ depth.
+3. **Operational alerts:** Add CloudWatch Alarms for failed Step Functions executions and SQS retry queue depth.
 4. **Custom Macie data identifiers:** Add domain-specific PII detection rules if Macie's managed identifiers are insufficient.
 5. **Concurrency controls:** Add reserved concurrency limits or EventBridge/SQS buffering for burst protection.
 6. **Integration tests:** Assert IAM policy scope and Step Functions input paths in the test suite.
