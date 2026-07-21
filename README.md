@@ -96,7 +96,7 @@ flowchart TB
 
         subgraph Error Handling
             retry[(SQS Retry Queue<br/>KMS · 14-day retention)]
-            rule -.->|dead letter| retry
+            rule -.->|failed events| retry
         end
 
         subgraph Compliance
@@ -126,7 +126,7 @@ flowchart TB
 | Component | Purpose | Why This Service |
 |---|---|---|
 | **S3 (Raw)** | Receives uploaded CSV files. Triggers the processing pipeline via EventBridge notifications. | S3 provides durable, infinitely scalable object storage with native event notifications. Multipart upload support is critical for multi-GB files. |
-| **EventBridge** | Routes S3 `Object Created` events to Step Functions. Acts as the decoupling layer between upload and processing. | EventBridge provides content-based filtering, input transformation, built-in retry with dead-letter queues, and no Lambda glue code. |
+| **EventBridge** | Routes S3 `Object Created` events to Step Functions. Acts as the decoupling layer between upload and processing. | EventBridge provides content-based filtering, input transformation, built-in retry with retry queues, and no Lambda glue code. |
 | **Step Functions** | Orchestrates the end-to-end workflow: TTL calculation, job status tracking, Fargate task execution, success/failure handling. | Step Functions provides visual workflow debugging, native ECS integration (`runTask.sync`), built-in retry/catch, X-Ray tracing, and timeout enforcement — all without custom orchestration code. |
 | **ECS Fargate** | Executes the CSV processor container in an isolated, serverless compute environment. | Fargate eliminates EC2 instance management. Tasks run for 5-10 minutes, which is too long for Lambda but does not justify a persistent ECS service. One-off tasks are the natural fit. |
 | **DynamoDB** | Stores job metadata (status, timestamps, failure cause) with TTL-based automatic cleanup. | DynamoDB provides single-digit-millisecond reads, PAY_PER_REQUEST billing for variable workloads, point-in-time recovery, and TTL for zero-cost cleanup of expired records. |
@@ -150,7 +150,7 @@ This section explains the reasoning behind every major architectural decision. E
 
 **Decision:** S3 `Object Created` events flow through EventBridge into Step Functions. The pipeline is fully asynchronous — the uploader does not wait for processing to complete.
 
-**Why:** Synchronous processing would require the uploader to hold a connection open for minutes, retry on failure, and handle partial processing states. Event-driven decoupling means uploaders write to S3 and return immediately. The platform guarantees eventual processing through Step Functions orchestration and SQS dead-letter queues.
+**Why:** Synchronous processing would require the uploader to hold a connection open for minutes, retry on failure, and handle partial processing states. Event-driven decoupling means uploaders write to S3 and return immediately. The platform guarantees eventual processing through Step Functions orchestration and SQS retry queues.
 
 **Benefits:**
 - Uploaders are decoupled from processing latency and failure modes.
@@ -530,7 +530,7 @@ Files arrive in the raw S3 bucket via multipart upload. The bucket has EventBrid
 
 An EventBridge rule matches `Object Created` events for the raw bucket and routes them to Step Functions. An input transformer strips the event to only the fields needed by the workflow (bucket name, object key, object size, sequencer).
 
-*Why this design:* EventBridge provides content-based filtering, input transformation, built-in retry, and a dead-letter queue — all without Lambda code. The input transformer implements data minimization, reducing the data exposed in Step Functions logs.
+*Why this design:* EventBridge provides content-based filtering, input transformation, built-in retry, and a retry queue — all without Lambda code. The input transformer implements data minimization, reducing the data exposed in Step Functions logs.
 
 **3. Orchestration**
 
@@ -624,11 +624,11 @@ For significantly higher throughput (hundreds of concurrent large files), consid
 - **Max attempts:** 2 retries (3 total attempts)
 - **Backoff:** Exponential, starting at 30 seconds with a backoff rate of 2
 
-**EventBridge retry:** Failed state machine invocations are retried up to 3 times with a maximum event age of 2 hours. Failed invocations after all retries are sent to the SQS dead-letter queue.
+**EventBridge retry:** Failed state machine invocations are retried up to 3 times with a maximum event age of 2 hours. Failed invocations after all retries are sent to the SQS retry queue.
 
 ### Dead Letter Queues
 
-The SQS `RetryQueue` serves as a dead-letter queue for EventBridge invocations that fail to start a state machine execution. The queue has:
+The SQS `RetryQueue` serves as a retry queue for EventBridge invocations that fail to start a state machine execution. The queue has:
 - 14-day retention period (gives operators time to investigate)
 - KMS encryption
 - SSL enforcement
@@ -643,7 +643,7 @@ The job ID is a deterministic composite of bucket name, object key, and S3 seque
 
 - **Task failures** are caught by Step Functions and recorded in DynamoDB before the workflow fails.
 - **Orchestration failures** (Step Functions errors) are logged to CloudWatch with X-Ray traces.
-- **Event delivery failures** are captured by the SQS dead-letter queue.
+- **Event delivery failures** are captured by the SQS retry queue.
 - **Processing failures** result in output being written to the failed bucket, preserving the artifact for investigation.
 
 ### Health Checks
