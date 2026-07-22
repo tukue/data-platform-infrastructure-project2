@@ -682,7 +682,7 @@ For significantly higher throughput (hundreds of concurrent large files), consid
 
 **EventBridge retry:** Failed state machine invocations are retried up to 3 times with a maximum event age of 2 hours. Failed invocations after all retries are sent to the SQS retry queue.
 
-### Dead Letter Queues
+### SQS retry Queues
 
 The SQS `RetryQueue` serves as a retry queue for EventBridge invocations that fail to start a state machine execution. The queue has:
 - 14-day retention period (gives operators time to investigate)
