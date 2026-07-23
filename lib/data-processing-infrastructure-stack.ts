@@ -957,7 +957,7 @@ def handler(event, context):
           outputLocation: `s3://${athenaResultsBucket.bucketName}/query-results/`,
           encryptionConfiguration: {
             encryptionOption: 'SSE_KMS',
-            kmsKeyArn: storageKey.keyArn,
+            kmsKey: storageKey.keyArn,
           },
         },
         enforceWorkgroupConfiguration: true,
