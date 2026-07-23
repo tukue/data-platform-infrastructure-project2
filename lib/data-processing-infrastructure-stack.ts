@@ -952,7 +952,7 @@ def handler(event, context):
       name: 'data-processing-analytics',
       description: 'Workgroup for analytics queries against processing events.',
       state: 'ENABLED',
-      configuration: {
+      workGroupConfiguration: {
         resultConfiguration: {
           outputLocation: `s3://${athenaResultsBucket.bucketName}/query-results/`,
           encryptionConfiguration: {
