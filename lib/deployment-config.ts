@@ -3,6 +3,7 @@ import * as cdk from 'aws-cdk-lib';
 export interface DeploymentConfig {
   env?: cdk.Environment;
   processorImage: string;
+  consumerImage: string;
   rawFileRetentionDays: number;
   processedFileRetentionDays: number;
   failedFileRetentionDays: number;
@@ -10,6 +11,9 @@ export interface DeploymentConfig {
   jobRetentionDays: number;
   processorCpu: number;
   processorMemory: number;
+  consumerCpu: number;
+  consumerMemory: number;
+  consumerDesiredCount: number;
   logRetentionDays: number;
   mskClusterName: string;
   mskInstanceType: string;
@@ -19,6 +23,7 @@ export interface DeploymentConfig {
   mskSuccessTopic: string;
   mskFailureTopic: string;
   mskRetentionHours: number;
+  mskConsumerGroup: string;
 }
 
 const CDK_CONTEXT = 'tryGetContext' as const;
@@ -53,8 +58,12 @@ export function resolveDeploymentConfig(app: cdk.App): DeploymentConfig {
   const jobRetentionDays = contextNumber(app, 'jobRetentionDays', 'JOB_RETENTION_DAYS', '30');
   const processorCpu = contextNumber(app, 'processorCpu', 'PROCESSOR_CPU', '1024');
   const processorMemory = contextNumber(app, 'processorMemory', 'PROCESSOR_MEMORY', '2048');
+  const consumerCpu = contextNumber(app, 'consumerCpu', 'CONSUMER_CPU', '512');
+  const consumerMemory = contextNumber(app, 'consumerMemory', 'CONSUMER_MEMORY', '1024');
+  const consumerDesiredCount = contextNumber(app, 'consumerDesiredCount', 'CONSUMER_DESIRED_COUNT', '2');
   const logRetentionDays = contextNumber(app, 'logRetentionDays', 'LOG_RETENTION_DAYS', '30');
   const processorImage = contextString(app, 'processorImage', 'PROCESSOR_IMAGE', '');
+  const consumerImage = contextString(app, 'consumerImage', 'CONSUMER_IMAGE', '');
   const enrichmentApiCidrs = parseCidrs(app);
   const mskClusterName = contextString(app, 'mskClusterName', 'MSK_CLUSTER_NAME', 'data-processing-streaming');
   const mskInstanceType = contextString(app, 'mskInstanceType', 'MSK_INSTANCE_TYPE', 'kafka.m5.large');
@@ -64,6 +73,7 @@ export function resolveDeploymentConfig(app: cdk.App): DeploymentConfig {
   const mskSuccessTopic = contextString(app, 'mskSuccessTopic', 'MSK_SUCCESS_TOPIC', 'processing.succeeded');
   const mskFailureTopic = contextString(app, 'mskFailureTopic', 'MSK_FAILURE_TOPIC', 'processing.failed');
   const mskRetentionHours = contextNumber(app, 'mskRetentionHours', 'MSK_RETENTION_HOURS', '168');
+  const mskConsumerGroup = contextString(app, 'mskConsumerGroup', 'MSK_CONSUMER_GROUP', 'data-processing-consumer');
 
   if (!Number.isInteger(rawFileRetentionDays) || rawFileRetentionDays < 1) {
     throw new Error('rawFileRetentionDays must be a positive integer.');
@@ -82,6 +92,15 @@ export function resolveDeploymentConfig(app: cdk.App): DeploymentConfig {
   }
   if (!Number.isInteger(processorMemory) || processorMemory < 512) {
     throw new Error('processorMemory must be an integer >= 512.');
+  }
+  if (!Number.isInteger(consumerCpu) || consumerCpu < 256) {
+    throw new Error('consumerCpu must be an integer >= 256.');
+  }
+  if (!Number.isInteger(consumerMemory) || consumerMemory < 512) {
+    throw new Error('consumerMemory must be an integer >= 512.');
+  }
+  if (!Number.isInteger(consumerDesiredCount) || consumerDesiredCount < 1) {
+    throw new Error('consumerDesiredCount must be a positive integer.');
   }
   if (!Number.isInteger(logRetentionDays) || logRetentionDays < 1) {
     throw new Error('logRetentionDays must be a positive integer.');
@@ -108,10 +127,20 @@ export function resolveDeploymentConfig(app: cdk.App): DeploymentConfig {
       'Tags like :latest are not allowed because they can be overwritten silently.',
     );
   }
+  if (consumerImage.length === 0) {
+    throw new Error('consumerImage must be provided through CDK context or CONSUMER_IMAGE.');
+  }
+  if (!/^.*@sha256:[a-f0-9]{64}$/.test(consumerImage)) {
+    throw new Error(
+      'consumerImage must be pinned to an image digest using @sha256:<hex> (e.g. account.dkr.ecr.region.amazonaws.com/repo@sha256:abc...). ' +
+      'Tags like :latest are not allowed because they can be overwritten silently.',
+    );
+  }
 
   return {
     env: account && region ? { account, region } : undefined,
     processorImage,
+    consumerImage,
     rawFileRetentionDays,
     processedFileRetentionDays,
     failedFileRetentionDays,
@@ -119,6 +148,9 @@ export function resolveDeploymentConfig(app: cdk.App): DeploymentConfig {
     jobRetentionDays,
     processorCpu,
     processorMemory,
+    consumerCpu,
+    consumerMemory,
+    consumerDesiredCount,
     logRetentionDays,
     mskClusterName,
     mskInstanceType,
@@ -128,5 +160,6 @@ export function resolveDeploymentConfig(app: cdk.App): DeploymentConfig {
     mskSuccessTopic,
     mskFailureTopic,
     mskRetentionHours,
+    mskConsumerGroup,
   };
 }

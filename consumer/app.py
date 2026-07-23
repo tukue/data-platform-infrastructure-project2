@@ -1,0 +1,121 @@
+"""Kafka consumer entry point — generic forwarder to DynamoDB.
+
+Architecture:
+    MSK Topics → Consumer (ECS Fargate) → DynamoDB EventsTable
+                                               ↓
+                                    Athena federated queries
+                                               ↓
+                                          Analytics
+
+The consumer does NO analytics. It is a thin, stateless forwarder.
+All analytics are performed via Athena SQL against DynamoDB.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import time
+import uuid
+from typing import Protocol
+
+import boto3
+import structlog
+from botocore.exceptions import ClientError
+from kafka_consumer import create_consumer, poll_loop
+
+structlog.configure(
+    processors=[
+        structlog.contextvars.merge_contextvars,
+        structlog.processors.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.format_exc_info,
+        structlog.dev.ConsoleRenderer() if sys.stderr.isatty() else structlog.processors.JSONRenderer(),
+    ],
+    wrapper_class=structlog.make_filtering_bound_logger(
+        int(os.environ.get("LOG_LEVEL", "INFO").upper())
+    ),
+    context_class=dict,
+    logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+    cache_logger_on_first_use=True,
+)
+
+logger = structlog.get_logger(__name__)
+
+
+class TableWriter(Protocol):
+    def put_item(self, *, Item: dict) -> dict: ...
+
+
+def _build_writer() -> TableWriter:
+    ddb = boto3.resource("dynamodb")
+    return ddb.Table(os.environ["EVENTS_TABLE_NAME"])
+
+
+def _handle_record(record: dict, writer: TableWriter) -> None:
+    try:
+        payload = json.loads(record["value"]) if record.get("value") else {}
+    except (json.JSONDecodeError, TypeError):
+        payload = {}
+
+    item = {
+        "EventId": str(uuid.uuid4()),
+        "Topic": record["topic"],
+        "Partition": record["partition"],
+        "Offset": record["offset"],
+        "ReceivedAt": int(time.time()),
+        "MessageKey": record.get("key"),
+        "Payload": payload,
+    }
+
+    if record.get("headers"):
+        item["Headers"] = record["headers"]
+
+    try:
+        writer.put_item(Item=item)
+    except ClientError as exc:
+        error_code = exc.response["Error"]["Code"]
+        if error_code in ("ProvisionedThroughputExceededException", "ThrottlingException"):
+            logger.warning("dynamo_throttled", event_id=item["EventId"], error_code=error_code)
+            time.sleep(1)
+            writer.put_item(Item=item)
+        else:
+            raise
+
+    logger.info(
+        "event_written",
+        event_id=item["EventId"],
+        topic=record["topic"],
+        partition=record["partition"],
+        offset=record["offset"],
+    )
+
+
+def main() -> None:
+    writer = _build_writer()
+
+    success_topic = os.environ.get("KAFKA_SUCCESS_TOPIC", "processing.succeeded")
+    failure_topic = os.environ.get("KAFKA_FAILURE_TOPIC", "processing.failed")
+
+    logger.info(
+        "starting_kafka_consumer",
+        bootstrap=os.environ.get("MSK_BOOTSTRAP_SERVERS", "(not set)"),
+        success_topic=success_topic,
+        failure_topic=failure_topic,
+        consumer_group=os.environ.get("KAFKA_CONSUMER_GROUP", "data-processing-consumer"),
+        events_table=os.environ.get("EVENTS_TABLE_NAME", "(not set)"),
+    )
+
+    def on_success(record: dict) -> None:
+        _handle_record(record, writer)
+
+    def on_failure(record: dict) -> None:
+        _handle_record(record, writer)
+
+    consumer = create_consumer()
+    poll_loop(consumer, {success_topic: on_success, failure_topic: on_failure})
+
+
+if __name__ == "__main__":
+    main()
