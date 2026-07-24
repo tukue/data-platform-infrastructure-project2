@@ -960,7 +960,7 @@ def handler(event, context):
             kmsKey: storageKey.keyArn,
           },
         },
-        enforceWorkgroupConfiguration: true,
+        enforceWorkGroupConfiguration: true,
         publishCloudWatchMetricsEnabled: true,
       },
     });
