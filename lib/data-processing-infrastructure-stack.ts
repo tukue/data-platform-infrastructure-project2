@@ -973,7 +973,7 @@ def handler(event, context):
       },
     });
 
-    new glue.CfnTable(this, 'ProcessingEventsTable', {
+    new glue.CfnTable(this, 'ProcessingEventsGlueTable', {
       catalogId: cdk.Aws.ACCOUNT_ID,
       databaseName: glueDatabase.ref,
       tableInput: {
