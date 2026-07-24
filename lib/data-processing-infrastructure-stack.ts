@@ -173,22 +173,8 @@ export class DataProcessingInfrastructureStack extends cdk.Stack {
       versioned: true,
     });
 
-    const jobTable = new dynamodb.Table(this, 'ProcessingJobsTable', {
-      partitionKey: {
-        name: 'JobId',
-        type: dynamodb.AttributeType.STRING,
-      },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      encryption: dynamodb.TableEncryption.CUSTOMER_MANAGED,
-      encryptionKey: operationalKey,
-      pointInTimeRecoverySpecification: {
-        pointInTimeRecoveryEnabled: true,
-      },
-      timeToLiveAttribute: 'Ttl',
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-    });
-
     const eventsTable = new dynamodb.Table(this, 'ProcessingEventsTable', {
+      tableName: 'ProcessingEvents',
       partitionKey: {
         name: 'EventId',
         type: dynamodb.AttributeType.STRING,
@@ -208,6 +194,21 @@ export class DataProcessingInfrastructureStack extends cdk.Stack {
       partitionKey: { name: 'Topic', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'ReceivedAt', type: dynamodb.AttributeType.NUMBER },
       projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    const jobTable = new dynamodb.Table(this, 'ProcessingJobsTable', {
+      partitionKey: {
+        name: 'JobId',
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      encryption: dynamodb.TableEncryption.CUSTOMER_MANAGED,
+      encryptionKey: operationalKey,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      timeToLiveAttribute: 'Ttl',
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
     const retryQueue = new sqs.Queue(this, 'RetryQueue', {
@@ -416,7 +417,7 @@ export class DataProcessingInfrastructureStack extends cdk.Stack {
     );
 
     mskBrokerSecurityGroup.addIngressRule(
-      consumerSecurityGroup,
+      ec2.Peer.securityGroupId(consumerSecurityGroup.securityGroupId),
       ec2.Port.tcp(9098),
       'Allow Kafka IAM auth from consumer tasks.',
     );
@@ -933,6 +934,7 @@ def handler(event, context):
     // ── Athena Analytics ─────────────────────────────────────────────────
 
     const athenaResultsBucket = new s3.Bucket(this, 'AthenaResultsBucket', {
+      bucketName: cdk.Fn.join('-', [cdk.Aws.ACCOUNT_ID, 'AthenaResults']),
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.KMS,
       encryptionKey: storageKey,
@@ -952,17 +954,17 @@ def handler(event, context):
       name: 'data-processing-analytics',
       description: 'Workgroup for analytics queries against processing events.',
       state: 'ENABLED',
-      workGroupConfiguration: {
-        resultConfiguration: {
-          outputLocation: `s3://${athenaResultsBucket.bucketName}/query-results/`,
-          encryptionConfiguration: {
-            encryptionOption: 'SSE_KMS',
-            kmsKey: storageKey.keyArn,
-          },
+    });
+    athenaWorkgroup.addPropertyOverride('Configuration', {
+      ResultConfiguration: {
+        OutputLocation: `s3://${athenaResultsBucket.bucketName}/query-results/`,
+        EncryptionConfiguration: {
+          EncryptionOption: 'SSE_KMS',
+          KmsKey: storageKey.keyArn,
         },
-        enforceWorkGroupConfiguration: true,
-        publishCloudWatchMetricsEnabled: true,
       },
+      EnforceWorkgroupConfiguration: true,
+      PublishCloudWatchMetricsEnabled: true,
     });
 
     const glueDatabase = new glue.CfnDatabase(this, 'AnalyticsGlueDatabase', {
