@@ -898,7 +898,9 @@ npm install
 aws configure
 cdk bootstrap aws://<account-id>/<region>
 npm run build
-cdk deploy -c processorImage=<account-id>.dkr.ecr.<region>.amazonaws.com/csv-processor@sha256:<hex>
+cdk deploy \
+  -c processorImage=<account-id>.dkr.ecr.<region>.amazonaws.com/csv-processor@sha256:<hex> \
+  -c consumerImage=<account-id>.dkr.ecr.<region>.amazonaws.com/kafka-consumer@sha256:<hex>
 ```
 
 ### Environment-Specific Deployment
@@ -909,6 +911,7 @@ The stack is portable across accounts and regions. Configuration is applied thro
 # Production deployment with custom retention and compute
 cdk deploy \
   -c processorImage=<account-id>.dkr.ecr.<region>.amazonaws.com/csv-processor@sha256:<hex> \
+  -c consumerImage=<account-id>.dkr.ecr.<region>.amazonaws.com/kafka-consumer@sha256:<hex> \
   -c rawFileRetentionDays=14 \
   -c processedFileRetentionDays=90 \
   -c failedFileRetentionDays=30 \
@@ -922,6 +925,7 @@ cdk deploy \
 # Development deployment with enrichment APIs
 cdk deploy \
   -c processorImage=<account-id>.dkr.ecr.<region>.amazonaws.com/csv-processor@sha256:<hex> \
+  -c consumerImage=<account-id>.dkr.ecr.<region>.amazonaws.com/kafka-consumer@sha256:<hex> \
   -c enrichmentApiCidrs=203.0.113.0/24,198.51.100.0/24
 ```
 
@@ -932,6 +936,7 @@ All configuration is available through CDK context (`-c key=value`) or environme
 | Option | CDK Context | Environment Variable | Default | Description |
 |---|---|---|---|---|
 | Processor image | `processorImage` | `PROCESSOR_IMAGE` | **Required** | Digest-pinned container image URI |
+| Consumer image | `consumerImage` | `CONSUMER_IMAGE` | **Required** | Digest-pinned Kafka consumer container image URI |
 | Raw file retention | `rawFileRetentionDays` | `RAW_FILE_RETENTION_DAYS` | 7 | Days before raw uploads expire |
 | Processed file retention | `processedFileRetentionDays` | `PROCESSED_FILE_RETENTION_DAYS` | 7 | Days before processed files expire |
 | Failed file retention | `failedFileRetentionDays` | `FAILED_FILE_RETENTION_DAYS` | 7 | Days before failed files expire |
