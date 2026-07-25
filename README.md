@@ -936,7 +936,7 @@ All configuration is available through CDK context (`-c key=value`) or environme
 | Option | CDK Context | Environment Variable | Default | Description |
 |---|---|---|---|---|
 | Processor image | `processorImage` | `PROCESSOR_IMAGE` | **Required** | Digest-pinned container image URI |
-| Consumer image | `consumerImage` | `CONSUMER_IMAGE` | **Required** | Digest-pinned Kafka consumer container image URI |
+| Consumer image | `consumerImage` | `CONSUMER_IMAGE` | Processor image | Digest-pinned Kafka consumer container image URI. Defaults to `processorImage` when omitted. |
 | Raw file retention | `rawFileRetentionDays` | `RAW_FILE_RETENTION_DAYS` | 7 | Days before raw uploads expire |
 | Processed file retention | `processedFileRetentionDays` | `PROCESSED_FILE_RETENTION_DAYS` | 7 | Days before processed files expire |
 | Failed file retention | `failedFileRetentionDays` | `FAILED_FILE_RETENTION_DAYS` | 7 | Days before failed files expire |
