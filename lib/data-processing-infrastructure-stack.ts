@@ -464,57 +464,6 @@ export class DataProcessingInfrastructureStack extends cdk.Stack {
       },
     });
 
-    const mskTopicProviderFunction = new lambda.Function(this, 'MskTopicProviderFunction', {
-      runtime: lambda.Runtime.PYTHON_3_12,
-      handler: 'index.handler',
-      code: lambda.Code.fromInline(`
-import json
-import os
-import urllib3
-
-def handler(event, context):
-    msk = __import__('boto3').client('kafka')
-    cluster_arn = event['ResourceProperties']['ClusterArn']
-    topics = event['ResourceProperties']['Topics']
-    retention_ms = event['ResourceProperties']['RetentionMs']
-
-    if event['RequestType'] == 'Delete':
-        return {'PhysicalResourceId': 'msk-topics'}
-
-    desc = msk.describe_cluster(ClusterArn=cluster_arn)
-    bootstrap = desc['ClusterInfo']['BootstrapBrokerStringSaslIam']
-    if not bootstrap:
-        raise Exception('Could not retrieve bootstrap servers')
-
-    brokers = bootstrap.split(',')[0].split(':')[0]
-    port = bootstrap.split(':')[1].split('/')[0] if ':' in bootstrap.split(',')[1] else '9098'
-
-    return {'PhysicalResourceId': 'msk-topics'}
-      `),
-      environment: {
-        MSK_CLUSTER_ARN: mskCluster.attrArn,
-      },
-      timeout: cdk.Duration.minutes(2),
-      vpc,
-      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-      securityGroups: [mskBrokerSecurityGroup],
-    });
-
-    mskTopicProviderFunction.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['kafka-cluster:Connect', 'kafka-cluster:DescribeCluster'],
-      resources: [mskCluster.attrArn],
-    }));
-
-    const mskTopicCustomResource = new cdk.CustomResource(this, 'MskTopics', {
-      serviceToken: mskTopicProviderFunction.functionArn,
-      properties: {
-        ClusterArn: mskCluster.attrArn,
-        Topics: [props.mskSuccessTopic, props.mskFailureTopic],
-        RetentionMs: props.mskRetentionHours * 60 * 60 * 1000,
-      },
-    });
-    mskTopicCustomResource.node.addDependency(mskCluster);
-
     const cluster = new ecs.Cluster(this, 'ProcessingCluster', {
       vpc,
     });
@@ -872,6 +821,8 @@ def handler(event, context):
         KAFKA_SUCCESS_TOPIC: props.mskSuccessTopic,
         KAFKA_FAILURE_TOPIC: props.mskFailureTopic,
         KAFKA_CONSUMER_GROUP: props.mskConsumerGroup,
+        KAFKA_TOPIC_PARTITIONS: '3',
+        KAFKA_TOPIC_REPLICATION_FACTOR: String(Math.min(3, props.mskNumberOfBrokerNodes)),
         EVENTS_TABLE_NAME: eventsTable.tableName,
       },
     });
@@ -889,10 +840,12 @@ def handler(event, context):
     consumerTaskDefinition.taskRole.addToPrincipalPolicy(new iam.PolicyStatement({
       actions: [
         'kafka-cluster:Connect',
+        'kafka-cluster:CreateTopic',
         'kafka-cluster:DescribeTopic',
         'kafka-cluster:ReadData',
         'kafka-cluster:DescribeGroup',
         'kafka-cluster:AlterGroup',
+        'kafka-cluster:AlterTopic',
       ],
       resources: [mskCluster.attrArn],
     }));
@@ -912,7 +865,7 @@ def handler(event, context):
       platformVersion: ecs.FargatePlatformVersion.LATEST,
     });
 
-    consumerService.node.addDependency(mskTopicCustomResource);
+    consumerService.node.addDependency(mskCluster);
 
     const scaling = consumerService.autoScaleTaskCount({
       minCapacity: props.consumerDesiredCount,

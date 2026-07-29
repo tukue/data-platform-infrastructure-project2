@@ -7,7 +7,8 @@ import signal
 from typing import Callable
 
 import structlog
-from confluent_kafka import Consumer, KafkaError
+from confluent_kafka import Consumer, KafkaError, KafkaException
+from confluent_kafka.admin import AdminClient, NewTopic
 
 logger = structlog.get_logger(__name__)
 
@@ -47,6 +48,48 @@ def create_consumer() -> Consumer:
         config["sasl.aws.region"] = os.environ.get("AWS_REGION", "eu-north-1")
 
     return Consumer(config)
+
+
+def _kafka_client_config() -> dict:
+    bootstrap = os.environ["MSK_BOOTSTRAP_SERVERS"]
+    security_protocol = os.environ.get("SECURITY_PROTOCOL", "SASL_SSL")
+
+    config: dict = {
+        "bootstrap.servers": bootstrap,
+        "security.protocol": security_protocol,
+    }
+
+    if security_protocol == "SASL_SSL":
+        config["sasl.mechanisms"] = "AWS_MSK_IAM"
+        config["sasl.aws.region"] = os.environ.get("AWS_REGION", "eu-north-1")
+
+    return config
+
+
+def ensure_topics(
+    topic_names: list[str],
+    *,
+    partitions: int,
+    replication_factor: int,
+) -> None:
+    admin = AdminClient(_kafka_client_config())
+    topics = [
+        NewTopic(topic, num_partitions=partitions, replication_factor=replication_factor)
+        for topic in topic_names
+    ]
+
+    futures = admin.create_topics(topics, operation_timeout=30)
+    for topic, future in futures.items():
+        try:
+            future.result()
+            logger.info("kafka_topic_created", topic=topic)
+        except KafkaException as exc:
+            error = exc.args[0] if exc.args else None
+            if error is not None and error.code() == KafkaError.TOPIC_ALREADY_EXISTS:
+                logger.info("kafka_topic_exists", topic=topic)
+                continue
+            logger.exception("kafka_topic_create_failed", topic=topic)
+            raise
 
 
 def poll_loop(
@@ -97,6 +140,7 @@ def poll_loop(
 
             except Exception:
                 logger.exception("message_processing_error", topic=topic, offset=msg.offset())
+                continue
 
     except ShutdownRequested:
         pass

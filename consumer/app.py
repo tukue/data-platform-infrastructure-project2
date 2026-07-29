@@ -14,6 +14,7 @@ All analytics are performed via Athena SQL against DynamoDB.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import time
@@ -23,7 +24,14 @@ from typing import Protocol
 import boto3
 import structlog
 from botocore.exceptions import ClientError
-from kafka_consumer import create_consumer, poll_loop
+from kafka_consumer import create_consumer, ensure_topics, poll_loop
+
+
+def _log_level() -> int:
+    raw_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+    if raw_level.isdigit():
+        return int(raw_level)
+    return getattr(logging, raw_level, logging.INFO)
 
 structlog.configure(
     processors=[
@@ -33,15 +41,21 @@ structlog.configure(
         structlog.processors.format_exc_info,
         structlog.dev.ConsoleRenderer() if sys.stderr.isatty() else structlog.processors.JSONRenderer(),
     ],
-    wrapper_class=structlog.make_filtering_bound_logger(
-        int(os.environ.get("LOG_LEVEL", "INFO").upper())
-    ),
+    wrapper_class=structlog.make_filtering_bound_logger(_log_level()),
     context_class=dict,
     logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
     cache_logger_on_first_use=True,
 )
 
 logger = structlog.get_logger(__name__)
+
+THROTTLE_ERRORS = {
+    "ProvisionedThroughputExceededException",
+    "ThrottlingException",
+    "RequestLimitExceeded",
+}
+MAX_DYNAMO_RETRIES = 5
+MAX_DYNAMO_BACKOFF_SECONDS = 8
 
 
 class TableWriter(Protocol):
@@ -72,16 +86,32 @@ def _handle_record(record: dict, writer: TableWriter) -> None:
     if record.get("headers"):
         item["Headers"] = record["headers"]
 
-    try:
-        writer.put_item(Item=item)
-    except ClientError as exc:
-        error_code = exc.response["Error"]["Code"]
-        if error_code in ("ProvisionedThroughputExceededException", "ThrottlingException"):
-            logger.warning("dynamo_throttled", event_id=item["EventId"], error_code=error_code)
-            time.sleep(1)
+    for attempt in range(MAX_DYNAMO_RETRIES):
+        try:
             writer.put_item(Item=item)
-        else:
-            raise
+            break
+        except ClientError as exc:
+            error_code = exc.response["Error"]["Code"]
+            if error_code not in THROTTLE_ERRORS:
+                raise
+            if attempt == MAX_DYNAMO_RETRIES - 1:
+                logger.error(
+                    "dynamo_throttled_max_retries",
+                    event_id=item["EventId"],
+                    error_code=error_code,
+                    attempts=MAX_DYNAMO_RETRIES,
+                )
+                raise
+
+            backoff = min(2 ** attempt, MAX_DYNAMO_BACKOFF_SECONDS)
+            logger.warning(
+                "dynamo_throttled",
+                event_id=item["EventId"],
+                error_code=error_code,
+                attempt=attempt + 1,
+                retry_in=backoff,
+            )
+            time.sleep(backoff)
 
     logger.info(
         "event_written",
@@ -113,7 +143,17 @@ def main() -> None:
     def on_failure(record: dict) -> None:
         _handle_record(record, writer)
 
+    topic_names = [success_topic, failure_topic]
+    topic_partitions = int(os.environ.get("KAFKA_TOPIC_PARTITIONS", "3"))
+    topic_replication_factor = int(os.environ.get("KAFKA_TOPIC_REPLICATION_FACTOR", "3"))
+
     consumer = create_consumer()
+
+    ensure_topics(
+        topic_names,
+        partitions=topic_partitions,
+        replication_factor=topic_replication_factor,
+    )
     poll_loop(consumer, {success_topic: on_success, failure_topic: on_failure})
 
 

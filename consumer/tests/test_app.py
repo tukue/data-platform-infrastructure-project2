@@ -90,18 +90,37 @@ class TestHandleRecord:
         item = writer.put_item.call_args[1]["Item"]
         assert "Headers" not in item
 
-    def test_retries_on_throttling(self) -> None:
+    @patch("app.time.sleep")
+    def test_retries_on_throttling(self, sleep: MagicMock) -> None:
         writer = MagicMock()
         throttle_error = ClientError(
             {"Error": {"Code": "ProvisionedThroughputExceededException", "Message": "throttled"}},
             "PutItem",
         )
-        writer.put_item.side_effect = [throttle_error, {}]
+        writer.put_item.side_effect = [throttle_error, throttle_error, {}]
 
         record = _make_record(value={"a": 1})
         _handle_record(record, writer)
 
-        assert writer.put_item.call_count == 2
+        assert writer.put_item.call_count == 3
+        sleep.assert_any_call(1)
+        sleep.assert_any_call(2)
+
+    @patch("app.time.sleep")
+    def test_raises_after_max_throttle_retries(self, sleep: MagicMock) -> None:
+        writer = MagicMock()
+        throttle_error = ClientError(
+            {"Error": {"Code": "ThrottlingException", "Message": "throttled"}},
+            "PutItem",
+        )
+        writer.put_item.side_effect = throttle_error
+
+        record = _make_record(value={"a": 1})
+        with pytest.raises(ClientError):
+            _handle_record(record, writer)
+
+        assert writer.put_item.call_count == 5
+        assert sleep.call_count == 4
 
     def test_raises_on_non_throttle_error(self) -> None:
         writer = MagicMock()

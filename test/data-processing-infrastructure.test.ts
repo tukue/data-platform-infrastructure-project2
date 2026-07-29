@@ -609,16 +609,16 @@ test('creates MSK broker CloudWatch log group', () => {
   expect(mskLogGroupKey).toBeDefined();
 });
 
-test('creates Lambda function for MSK topic provisioning', () => {
+test('does not synthesize no-op MSK topic provisioning Lambda', () => {
   const app = new cdk.App();
   const stack = new DataProcessingInfrastructure.DataProcessingInfrastructureStack(app, 'MskTopicProviderTest', defaultProps);
   const template = Template.fromStack(stack);
 
   const functions = template.findResources('AWS::Lambda::Function');
-  const topicProvider = Object.values(functions).find((fn: any) =>
-    JSON.stringify(fn).includes('MskTopicProvider')
+  const topicProvider = Object.values(functions).filter((fn: any) =>
+    JSON.stringify(fn).includes('MskTopicProvider'),
   );
-  expect(topicProvider).toBeDefined();
+  expect(topicProvider).toHaveLength(0);
 });
 
 test('rejects invalid MSK broker node count', () => {
@@ -713,6 +713,8 @@ test('consumer container has MSK and topic environment variables', () => {
   expect(envNames).toContain('KAFKA_SUCCESS_TOPIC');
   expect(envNames).toContain('KAFKA_FAILURE_TOPIC');
   expect(envNames).toContain('KAFKA_CONSUMER_GROUP');
+  expect(envNames).toContain('KAFKA_TOPIC_PARTITIONS');
+  expect(envNames).toContain('KAFKA_TOPIC_REPLICATION_FACTOR');
 });
 
 test('creates consumer Fargate service', () => {
@@ -734,9 +736,11 @@ test('consumer task role includes Kafka read permissions', () => {
 
   const synthesized = JSON.stringify(template.toJSON());
   expect(synthesized).toContain('kafka-cluster:Connect');
+  expect(synthesized).toContain('kafka-cluster:CreateTopic');
   expect(synthesized).toContain('kafka-cluster:ReadData');
   expect(synthesized).toContain('kafka-cluster:DescribeGroup');
   expect(synthesized).toContain('kafka-cluster:AlterGroup');
+  expect(synthesized).toContain('kafka-cluster:AlterTopic');
 });
 
 test('creates consumer log group', () => {

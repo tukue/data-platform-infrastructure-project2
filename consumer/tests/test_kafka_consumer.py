@@ -5,8 +5,9 @@ import time
 from unittest.mock import MagicMock, patch
 
 import pytest
+from confluent_kafka import KafkaError, KafkaException
 
-from kafka_consumer import ShutdownRequested, create_consumer, poll_loop
+from kafka_consumer import ShutdownRequested, create_consumer, ensure_topics, poll_loop
 
 
 def _make_message(
@@ -156,4 +157,42 @@ class TestPollLoop:
             raise RuntimeError("boom")
 
         poll_loop(consumer, {"processing.succeeded": exploding_handler})
+        consumer.commit.assert_not_called()
         consumer.close.assert_called_once()
+
+
+class TestEnsureTopics:
+    @patch.dict("os.environ", {
+        "MSK_BOOTSTRAP_SERVERS": "b-1.msk.abc:9098",
+        "SECURITY_PROTOCOL": "SASL_SSL",
+        "AWS_REGION": "us-east-1",
+    }, clear=True)
+    @patch("kafka_consumer.AdminClient")
+    def test_creates_topics(self, MockAdminClient: MagicMock) -> None:
+        future = MagicMock()
+        admin = MockAdminClient.return_value
+        admin.create_topics.return_value = {"processing.succeeded": future}
+
+        ensure_topics(["processing.succeeded"], partitions=3, replication_factor=3)
+
+        config = MockAdminClient.call_args[0][0]
+        assert config["security.protocol"] == "SASL_SSL"
+        assert config["sasl.mechanisms"] == "AWS_MSK_IAM"
+        admin.create_topics.assert_called_once()
+        topic = admin.create_topics.call_args[0][0][0]
+        assert topic.topic == "processing.succeeded"
+        future.result.assert_called_once()
+
+    @patch.dict("os.environ", {
+        "MSK_BOOTSTRAP_SERVERS": "localhost:29092",
+        "SECURITY_PROTOCOL": "PLAINTEXT",
+    }, clear=True)
+    @patch("kafka_consumer.AdminClient")
+    def test_ignores_existing_topics(self, MockAdminClient: MagicMock) -> None:
+        error = MagicMock()
+        error.code.return_value = KafkaError.TOPIC_ALREADY_EXISTS
+        future = MagicMock()
+        future.result.side_effect = KafkaException(error)
+        MockAdminClient.return_value.create_topics.return_value = {"processing.succeeded": future}
+
+        ensure_topics(["processing.succeeded"], partitions=3, replication_factor=1)
