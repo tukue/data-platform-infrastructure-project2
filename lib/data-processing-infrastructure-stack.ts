@@ -948,6 +948,7 @@ def handler(event, context):
           transitions: [],
         },
       ],
+      versioned: true,
     });
 
     const athenaWorkgroup = new athena.CfnWorkGroup(this, 'AnalyticsWorkgroup', {

@@ -986,4 +986,7 @@ test('creates Athena results bucket with KMS encryption', () => {
   ) as any;
   expect(athenaBucket).toBeDefined();
   expect(athenaBucket.Properties.BucketEncryption).toBeDefined();
+  expect(athenaBucket.Properties.VersioningConfiguration).toEqual({
+    Status: 'Enabled',
+  });
 });
