@@ -63,8 +63,7 @@ export function resolveDeploymentConfig(app: cdk.App): DeploymentConfig {
   const consumerDesiredCount = contextNumber(app, 'consumerDesiredCount', 'CONSUMER_DESIRED_COUNT', '2');
   const logRetentionDays = contextNumber(app, 'logRetentionDays', 'LOG_RETENTION_DAYS', '30');
   const processorImage = contextString(app, 'processorImage', 'PROCESSOR_IMAGE', '');
-  const configuredConsumerImage = contextString(app, 'consumerImage', 'CONSUMER_IMAGE', '');
-  const consumerImage = configuredConsumerImage || processorImage;
+  const consumerImage = contextString(app, 'consumerImage', 'CONSUMER_IMAGE', '');
   const enrichmentApiCidrs = parseCidrs(app);
   const mskClusterName = contextString(app, 'mskClusterName', 'MSK_CLUSTER_NAME', 'data-processing-streaming');
   const mskInstanceType = contextString(app, 'mskInstanceType', 'MSK_INSTANCE_TYPE', 'kafka.m5.large');
@@ -127,6 +126,9 @@ export function resolveDeploymentConfig(app: cdk.App): DeploymentConfig {
       'processorImage must be pinned to an image digest using @sha256:<hex> (e.g. account.dkr.ecr.region.amazonaws.com/repo@sha256:abc...). ' +
       'Tags like :latest are not allowed because they can be overwritten silently.',
     );
+  }
+  if (consumerImage.length === 0) {
+    throw new Error('consumerImage must be provided through CDK context or CONSUMER_IMAGE.');
   }
   if (!/^.*@sha256:[a-f0-9]{64}$/.test(consumerImage)) {
     throw new Error(

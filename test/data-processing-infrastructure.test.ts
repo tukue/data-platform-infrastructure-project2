@@ -313,6 +313,7 @@ test('requires a consumer image', () => {
   const app = new cdk.App();
   const prevEnv = { ...process.env };
   process.env.PROCESSOR_IMAGE = TEST_PROCESSOR_IMAGE;
+  delete process.env.CONSUMER_IMAGE;
   expect(() => resolveDeploymentConfig(app)).toThrow(
     'consumerImage must be provided through CDK context or CONSUMER_IMAGE.',
   );
@@ -782,14 +783,16 @@ test('consumer auto-scaling has CPU and memory targets', () => {
   expect(consumerScalingPolicies.length).toBeGreaterThanOrEqual(1);
 });
 
-test('consumer image defaults to processor image when not provided', () => {
+test('consumer image must be provided', () => {
   const app = new cdk.App();
   const prevEnv = { ...process.env };
   Object.assign(process.env, {
     PROCESSOR_IMAGE: TEST_PROCESSOR_IMAGE,
     CONSUMER_IMAGE: '',
   });
-  expect(resolveDeploymentConfig(app).consumerImage).toBe(TEST_PROCESSOR_IMAGE);
+  expect(() => resolveDeploymentConfig(app)).toThrow(
+    'consumerImage must be provided through CDK context or CONSUMER_IMAGE.',
+  );
   process.env = prevEnv;
 });
 
