@@ -45,7 +45,7 @@ class TestCreateConsumer:
         "MSK_BOOTSTRAP_SERVERS": "b-1.msk.abc:9098",
         "KAFKA_CONSUMER_GROUP": "test-group",
         "SECURITY_PROTOCOL": "SASL_SSL",
-        "AWS_REGION": "us-east-1",
+        "AWS_REGION": "eu-west-1",
     })
     @patch("kafka_consumer.Consumer")
     def test_sasl_ssl_config(self, MockConsumer: MagicMock) -> None:
@@ -53,7 +53,7 @@ class TestCreateConsumer:
         call_args = MockConsumer.call_args[0][0]
         assert call_args["security.protocol"] == "SASL_SSL"
         assert call_args["sasl.mechanisms"] == "AWS_MSK_IAM"
-        assert call_args["sasl.aws.region"] == "us-east-1"
+        assert call_args["sasl.aws.region"] == "eu-west-1"
         assert call_args["group.id"] == "test-group"
 
     @patch.dict("os.environ", {
@@ -165,7 +165,7 @@ class TestEnsureTopics:
     @patch.dict("os.environ", {
         "MSK_BOOTSTRAP_SERVERS": "b-1.msk.abc:9098",
         "SECURITY_PROTOCOL": "SASL_SSL",
-        "AWS_REGION": "us-east-1",
+        "AWS_REGION": "eu-west-1",
     }, clear=True)
     @patch("kafka_consumer.AdminClient")
     def test_creates_topics(self, MockAdminClient: MagicMock) -> None:
