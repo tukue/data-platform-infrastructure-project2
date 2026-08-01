@@ -233,6 +233,10 @@ test('omits env when neither AWS_ACCOUNT_ID nor AWS_REGION are set', () => {
     PROCESSOR_IMAGE: TEST_PROCESSOR_IMAGE,
     CONSUMER_IMAGE: TEST_CONSUMER_IMAGE,
   });
+  delete process.env.AWS_ACCOUNT_ID;
+  delete process.env.AWS_REGION;
+  delete process.env.CDK_DEFAULT_ACCOUNT;
+  delete process.env.CDK_DEFAULT_REGION;
   const config = resolveDeploymentConfig(app);
   process.env = prevEnv;
 

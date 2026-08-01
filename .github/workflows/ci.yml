@@ -9,12 +9,6 @@ on:
 permissions:
   contents: read
 
-env:
-  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID || '000000000000' }}
-  AWS_REGION: ${{ vars.AWS_REGION || 'eu-west-1' }}
-  CDK_DEFAULT_ACCOUNT: ${{ vars.AWS_ACCOUNT_ID || '000000000000' }}
-  CDK_DEFAULT_REGION: ${{ vars.AWS_REGION || 'eu-west-1' }}
-
 jobs:
   validate:
     name: Build, test, and synth
@@ -44,6 +38,11 @@ jobs:
           npx cdk synth --no-notices
           -c processorImage=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/csv-processor@sha256:0000000000000000000000000000000000000000000000000000000000000000
           -c consumerImage=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/kafka-consumer@sha256:0000000000000000000000000000000000000000000000000000000000000000
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID || '000000000000' }}
+          AWS_REGION: ${{ vars.AWS_REGION || 'eu-west-1' }}
+          CDK_DEFAULT_ACCOUNT: ${{ vars.AWS_ACCOUNT_ID || '000000000000' }}
+          CDK_DEFAULT_REGION: ${{ vars.AWS_REGION || 'eu-west-1' }}
 
       - name: Install OPA
         run: |
