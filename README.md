@@ -164,13 +164,77 @@ This prevents permanent event loss when DynamoDB writes, parsing, or handler log
 
 DynamoDB throttling uses bounded exponential backoff instead of a single retry.
 
-```text
-attempt 1 -> write
-attempt 2 -> wait 1s
-attempt 3 -> wait 2s
-attempt 4 -> wait 4s
-attempt 5 -> wait 8s
-```
+### Future improvements 
+
+For significantly higher throughput (hundreds of concurrent large files), consider:
+- Adding SQS buffering between EventBridge and Step Functions for burst absorption.
+- Implementing reserved concurrency limits on Step Functions to prevent downstream resource exhaustion.
+- Evaluating AWS Batch for workloads that require sophisticated scheduling, priorities, or fair-share scheduling.
+
+---
+
+## Reliability
+
+### Retry Mechanisms
+
+**Step Functions retry:** The ECS task step is configured with retry logic:
+- **Errors retried:** `ECS.AmazonECSException`, `ECS.ServiceException`, `States.TaskFailed`
+- **Max attempts:** 2 retries (3 total attempts)
+- **Backoff:** Exponential, starting at 30 seconds with a backoff rate of 2
+
+**EventBridge retry:** Failed state machine invocations are retried up to 3 times with a maximum event age of 2 hours. Failed invocations after all retries are sent to the SQS retry queue.
+
+### SQS retry Queues
+
+The SQS `RetryQueue` serves as a retry queue for EventBridge invocations that fail to start a state machine execution. The queue has:
+- 14-day retention period (gives operators time to investigate)
+- KMS encryption
+- SSL enforcement
+
+### Idempotent Processing
+
+The job ID is a deterministic composite of bucket name, object key, and S3 sequencer. This means:
+- Re-uploading the same file (with a new sequencer) creates a new job record — providing an audit trail.
+- If Step Functions delivers the same event twice (at-least-once delivery), the DynamoDB PutItem is idempotent for the same job ID.
+
+### Failure Isolation
+
+- **Task failures** are caught by Step Functions and recorded in DynamoDB before the workflow fails.
+- **Orchestration failures** (Step Functions errors) are logged to CloudWatch with X-Ray traces.
+- **Event delivery failures** are captured by the SQS retry queue.
+- **Processing failures** result in output being written to the failed bucket, preserving the artifact for investigation.
+
+### Health Checks
+
+Step Functions provides built-in execution monitoring. The state machine has a 30-minute timeout to prevent runaway executions. ECS Fargate tasks are monitored by the ECS service scheduler — if a task crashes, Step Functions receives the failure and applies retry logic.
+
+### High Availability
+
+- **S3:** 99.999999999% durability, cross-region replication can be added.
+- **DynamoDB:** Point-in-time recovery is enabled. PAY_PER_REQUEST mode runs across multiple AZs.
+- **Step Functions:** Managed service with built-in HA across AZs.
+- **ECS Fargate:** Tasks run across private subnets in 3 AZs.
+- **VPC:** 3 AZ deployment with public and private subnets.
+
+### Disaster Recovery
+
+- **DynamoDB:** Point-in-time recovery enables restore to any point in the last 35 days.
+- **S3:** Versioning is enabled on all buckets. Object Lock provides immutability. Cross-region replication can be added for DR.
+- **CloudTrail:** Logs are stored in a dedicated, encrypted CloudWatch log group for audit and recovery.
+- **Infrastructure:** The CDK stack can be redeployed to a different account or region using the same code with different configuration.
+
+### Backup Strategy
+
+- **DynamoDB:** Automated backups via point-in-time recovery.
+- **S3:** Versioning provides point-in-time object recovery. Lifecycle policies control retention.
+- **Secrets:** Secrets Manager handles automatic rotation and versioning.
+- **Infrastructure:** The CDK source code in Git is the backup for infrastructure definitions.
+
+---
+
+## Security
+
+### Authentication
 
 If all retries fail, the exception propagates, the Kafka offset is not committed, and the event can be retried.
 
