@@ -5,9 +5,12 @@ import * as DataProcessingInfrastructure from '../lib/data-processing-infrastruc
 
 const TEST_PROCESSOR_IMAGE = '123456789012.dkr.ecr.eu-north-1.amazonaws.com/csv-processor@sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890';
 const TEST_PROCESSOR_IMAGE_CONTEXT = '123456789012.dkr.ecr.eu-west-1.amazonaws.com/csv-processor@sha256:0000000000000000000000000000000000000000000000000000000000000000';
+const TEST_CONSUMER_IMAGE = '123456789012.dkr.ecr.eu-north-1.amazonaws.com/kafka-consumer@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
+const TEST_CONSUMER_IMAGE_CONTEXT = '123456789012.dkr.ecr.eu-west-1.amazonaws.com/kafka-consumer@sha256:1111111111111111111111111111111111111111111111111111111111111111';
 
 const defaultProps = {
   processorImage: TEST_PROCESSOR_IMAGE,
+  consumerImage: TEST_CONSUMER_IMAGE,
   rawFileRetentionDays: 7,
   processedFileRetentionDays: 7,
   failedFileRetentionDays: 7,
@@ -15,6 +18,9 @@ const defaultProps = {
   jobRetentionDays: 30,
   processorCpu: 1024,
   processorMemory: 2048,
+  consumerCpu: 512,
+  consumerMemory: 1024,
+  consumerDesiredCount: 2,
   logRetentionDays: 30,
   mskClusterName: 'test-streaming',
   mskInstanceType: 'kafka.m5.large',
@@ -24,6 +30,7 @@ const defaultProps = {
   mskSuccessTopic: 'processing.succeeded',
   mskFailureTopic: 'processing.failed',
   mskRetentionHours: 168,
+  mskConsumerGroup: 'data-processing-consumer',
 };
 
 test('creates secured buckets, ECS task, and workflow trigger', () => {
@@ -31,7 +38,7 @@ test('creates secured buckets, ECS task, and workflow trigger', () => {
   const stack = new DataProcessingInfrastructure.DataProcessingInfrastructureStack(app, 'MyTestStack', defaultProps);
   const template = Template.fromStack(stack);
 
-  template.resourceCountIs('AWS::S3::Bucket', 5);
+  template.resourceCountIs('AWS::S3::Bucket', 6);
   template.hasResourceProperties('AWS::S3::Bucket', {
     PublicAccessBlockConfiguration: {
       BlockPublicAcls: true,
@@ -79,7 +86,7 @@ test('creates secured buckets, ECS task, and workflow trigger', () => {
   const lifecycleBuckets = Object.values(template.findResources('AWS::S3::Bucket')).filter(
     (bucket: any) => bucket.Properties?.LifecycleConfiguration,
   );
-  expect(lifecycleBuckets).toHaveLength(4);
+  expect(lifecycleBuckets).toHaveLength(5);
 
   template.hasResourceProperties('AWS::ECS::TaskDefinition', {
     ContainerDefinitions: Match.arrayWith([
@@ -183,7 +190,7 @@ test('uses configured raw file retention days in lifecycle policy', () => {
   const lifecycleBuckets = Object.values(template.findResources('AWS::S3::Bucket')).filter(
     (bucket: any) => bucket.Properties?.LifecycleConfiguration,
   );
-  expect(lifecycleBuckets).toHaveLength(4);
+  expect(lifecycleBuckets).toHaveLength(5);
 });
 
 test('resolves deployment account, region, and retention from environment', () => {
@@ -193,6 +200,7 @@ test('resolves deployment account, region, and retention from environment', () =
     AWS_ACCOUNT_ID: 'test-account',
     AWS_REGION: 'eu-north-1',
     PROCESSOR_IMAGE: TEST_PROCESSOR_IMAGE,
+    CONSUMER_IMAGE: TEST_CONSUMER_IMAGE,
     RAW_FILE_RETENTION_DAYS: '21',
   });
 
@@ -204,6 +212,7 @@ test('resolves deployment account, region, and retention from environment', () =
       region: 'eu-north-1',
     },
     processorImage: TEST_PROCESSOR_IMAGE,
+    consumerImage: TEST_CONSUMER_IMAGE,
     rawFileRetentionDays: 21,
     processedFileRetentionDays: 7,
     failedFileRetentionDays: 7,
@@ -222,7 +231,12 @@ test('omits env when neither AWS_ACCOUNT_ID nor AWS_REGION are set', () => {
   const prevEnv = { ...process.env };
   Object.assign(process.env, {
     PROCESSOR_IMAGE: TEST_PROCESSOR_IMAGE,
+    CONSUMER_IMAGE: TEST_CONSUMER_IMAGE,
   });
+  delete process.env.AWS_ACCOUNT_ID;
+  delete process.env.AWS_REGION;
+  delete process.env.CDK_DEFAULT_ACCOUNT;
+  delete process.env.CDK_DEFAULT_REGION;
   const config = resolveDeploymentConfig(app);
   process.env = prevEnv;
 
@@ -243,12 +257,14 @@ test('allows CDK context to override raw file retention days', () => {
   const app = new cdk.App({
     context: {
       processorImage: TEST_PROCESSOR_IMAGE_CONTEXT,
+      consumerImage: TEST_CONSUMER_IMAGE_CONTEXT,
       rawFileRetentionDays: '30',
     },
   });
 
   const config = resolveDeploymentConfig(app);
   expect(config.processorImage).toBe(TEST_PROCESSOR_IMAGE_CONTEXT);
+  expect(config.consumerImage).toBe(TEST_CONSUMER_IMAGE_CONTEXT);
   expect(config.rawFileRetentionDays).toBe(30);
   expect(config.processedFileRetentionDays).toBe(7);
   expect(config.failedFileRetentionDays).toBe(7);
@@ -259,6 +275,7 @@ test('rejects invalid raw file retention days', () => {
   const prevEnv = { ...process.env };
   process.env.RAW_FILE_RETENTION_DAYS = '0';
   process.env.PROCESSOR_IMAGE = TEST_PROCESSOR_IMAGE;
+  process.env.CONSUMER_IMAGE = TEST_CONSUMER_IMAGE;
   expect(() =>
     resolveDeploymentConfig(app),
   ).toThrow('rawFileRetentionDays must be a positive integer.');
@@ -270,6 +287,7 @@ test('rejects invalid processed file retention days', () => {
   const prevEnv = { ...process.env };
   process.env.PROCESSED_FILE_RETENTION_DAYS = '0';
   process.env.PROCESSOR_IMAGE = TEST_PROCESSOR_IMAGE;
+  process.env.CONSUMER_IMAGE = TEST_CONSUMER_IMAGE;
   expect(() =>
     resolveDeploymentConfig(app),
   ).toThrow('processedFileRetentionDays must be a positive integer.');
@@ -281,6 +299,7 @@ test('rejects invalid failed file retention days', () => {
   const prevEnv = { ...process.env };
   process.env.FAILED_FILE_RETENTION_DAYS = '0';
   process.env.PROCESSOR_IMAGE = TEST_PROCESSOR_IMAGE;
+  process.env.CONSUMER_IMAGE = TEST_CONSUMER_IMAGE;
   expect(() =>
     resolveDeploymentConfig(app),
   ).toThrow('failedFileRetentionDays must be a positive integer.');
@@ -292,6 +311,17 @@ test('requires a processor image', () => {
   expect(() => resolveDeploymentConfig(app)).toThrow(
     'processorImage must be provided through CDK context or PROCESSOR_IMAGE.',
   );
+});
+
+test('requires a consumer image', () => {
+  const app = new cdk.App();
+  const prevEnv = { ...process.env };
+  process.env.PROCESSOR_IMAGE = TEST_PROCESSOR_IMAGE;
+  delete process.env.CONSUMER_IMAGE;
+  expect(() => resolveDeploymentConfig(app)).toThrow(
+    'consumerImage must be provided through CDK context or CONSUMER_IMAGE.',
+  );
+  process.env = prevEnv;
 });
 
 test('DynamoDB table has TTL configured with TimeToLive attribute', () => {
@@ -342,6 +372,7 @@ test('rejects invalid job retention days', () => {
   const prevEnv = { ...process.env };
   process.env.JOB_RETENTION_DAYS = '0';
   process.env.PROCESSOR_IMAGE = TEST_PROCESSOR_IMAGE;
+  process.env.CONSUMER_IMAGE = TEST_CONSUMER_IMAGE;
   expect(() =>
     resolveDeploymentConfig(app),
   ).toThrow('jobRetentionDays must be a positive integer.');
@@ -415,6 +446,7 @@ test('resolves new configuration options from environment', () => {
   const app = new cdk.App();
   Object.assign(process.env, {
     PROCESSOR_IMAGE: TEST_PROCESSOR_IMAGE,
+    CONSUMER_IMAGE: TEST_CONSUMER_IMAGE,
     PROCESSOR_CPU: '512',
     PROCESSOR_MEMORY: '1024',
     LOG_RETENTION_DAYS: '14',
@@ -430,12 +462,14 @@ test('resolves new configuration options from environment', () => {
   delete process.env.PROCESSOR_MEMORY;
   delete process.env.LOG_RETENTION_DAYS;
   delete process.env.PROCESSOR_IMAGE;
+  delete process.env.CONSUMER_IMAGE;
 });
 
 test('resolves new configuration options from CDK context', () => {
   const app = new cdk.App({
     context: {
       processorImage: TEST_PROCESSOR_IMAGE_CONTEXT,
+      consumerImage: TEST_CONSUMER_IMAGE_CONTEXT,
       processorCpu: '2048',
       processorMemory: '4096',
       logRetentionDays: '90',
@@ -579,16 +613,16 @@ test('creates MSK broker CloudWatch log group', () => {
   expect(mskLogGroupKey).toBeDefined();
 });
 
-test('creates Lambda function for MSK topic provisioning', () => {
+test('does not synthesize no-op MSK topic provisioning Lambda', () => {
   const app = new cdk.App();
   const stack = new DataProcessingInfrastructure.DataProcessingInfrastructureStack(app, 'MskTopicProviderTest', defaultProps);
   const template = Template.fromStack(stack);
 
   const functions = template.findResources('AWS::Lambda::Function');
-  const topicProvider = Object.values(functions).find((fn: any) =>
-    JSON.stringify(fn).includes('MskTopicProvider')
+  const topicProvider = Object.values(functions).filter((fn: any) =>
+    JSON.stringify(fn).includes('MskTopicProvider'),
   );
-  expect(topicProvider).toBeDefined();
+  expect(topicProvider).toHaveLength(0);
 });
 
 test('rejects invalid MSK broker node count', () => {
@@ -596,6 +630,7 @@ test('rejects invalid MSK broker node count', () => {
   const prevEnv = { ...process.env };
   Object.assign(process.env, {
     PROCESSOR_IMAGE: TEST_PROCESSOR_IMAGE,
+    CONSUMER_IMAGE: TEST_CONSUMER_IMAGE,
     MSK_NUMBER_OF_BROKER_NODES: '2',
   });
   expect(() => resolveDeploymentConfig(app)).toThrow(
@@ -609,6 +644,7 @@ test('rejects invalid MSK EBS volume size', () => {
   const prevEnv = { ...process.env };
   Object.assign(process.env, {
     PROCESSOR_IMAGE: TEST_PROCESSOR_IMAGE,
+    CONSUMER_IMAGE: TEST_CONSUMER_IMAGE,
     MSK_EBS_VOLUME_SIZE: '0',
   });
   expect(() => resolveDeploymentConfig(app)).toThrow(
@@ -622,6 +658,7 @@ test('resolves MSK configuration from environment', () => {
   const prevEnv = { ...process.env };
   Object.assign(process.env, {
     PROCESSOR_IMAGE: TEST_PROCESSOR_IMAGE,
+    CONSUMER_IMAGE: TEST_CONSUMER_IMAGE,
     MSK_CLUSTER_NAME: 'custom-cluster',
     MSK_INSTANCE_TYPE: 'kafka.m5.xlarge',
     MSK_NUMBER_OF_BROKER_NODES: '6',
@@ -637,4 +674,327 @@ test('resolves MSK configuration from environment', () => {
   expect(config.mskFailureTopic).toBe('custom.failure');
 
   process.env = prevEnv;
+});
+
+test('creates consumer ECS task definition with correct image and resources', () => {
+  const app = new cdk.App();
+  const stack = new DataProcessingInfrastructure.DataProcessingInfrastructureStack(app, 'ConsumerTaskTest', defaultProps);
+  const template = Template.fromStack(stack);
+
+  const taskDefs = template.findResources('AWS::ECS::TaskDefinition');
+  const consumerTaskDef = Object.values(taskDefs).find((td: any) =>
+    JSON.stringify(td).includes('KafkaConsumerContainer'),
+  ) as any;
+  expect(consumerTaskDef).toBeDefined();
+  expect(consumerTaskDef.Properties.Cpu).toBe('512');
+  expect(consumerTaskDef.Properties.Memory).toBe('1024');
+  expect(consumerTaskDef.Properties.RequiresCompatibilities).toEqual(['FARGATE']);
+
+  const containerDef = consumerTaskDef.Properties.ContainerDefinitions.find(
+    (c: any) => c.Name === 'KafkaConsumerContainer',
+  );
+  expect(containerDef.Image).toBe(TEST_CONSUMER_IMAGE);
+  expect(containerDef.ReadonlyRootFilesystem).toBe(true);
+  expect(containerDef.User).toBe('65534:65534');
+});
+
+test('consumer container has MSK and topic environment variables', () => {
+  const app = new cdk.App();
+  const stack = new DataProcessingInfrastructure.DataProcessingInfrastructureStack(app, 'ConsumerEnvTest', defaultProps);
+  const template = Template.fromStack(stack);
+
+  const taskDefs = template.findResources('AWS::ECS::TaskDefinition');
+  const consumerTaskDef = Object.values(taskDefs).find((td: any) =>
+    JSON.stringify(td).includes('KafkaConsumerContainer'),
+  ) as any;
+  expect(consumerTaskDef).toBeDefined();
+
+  const containerDef = consumerTaskDef.Properties.ContainerDefinitions.find(
+    (c: any) => c.Name === 'KafkaConsumerContainer',
+  );
+  const envNames = containerDef.Environment.map((e: any) => e.Name);
+  expect(envNames).toContain('MSK_BOOTSTRAP_SERVERS');
+  expect(envNames).toContain('KAFKA_SUCCESS_TOPIC');
+  expect(envNames).toContain('KAFKA_FAILURE_TOPIC');
+  expect(envNames).toContain('KAFKA_CONSUMER_GROUP');
+  expect(envNames).toContain('KAFKA_TOPIC_PARTITIONS');
+  expect(envNames).toContain('KAFKA_TOPIC_REPLICATION_FACTOR');
+});
+
+test('creates consumer Fargate service', () => {
+  const app = new cdk.App();
+  const stack = new DataProcessingInfrastructure.DataProcessingInfrastructureStack(app, 'ConsumerServiceTest', defaultProps);
+  const template = Template.fromStack(stack);
+
+  template.hasResourceProperties('AWS::ECS::Service', {
+    DesiredCount: 2,
+    LaunchType: 'FARGATE',
+    PlatformVersion: 'LATEST',
+  });
+});
+
+test('consumer task role includes Kafka read permissions', () => {
+  const app = new cdk.App();
+  const stack = new DataProcessingInfrastructure.DataProcessingInfrastructureStack(app, 'ConsumerIamTest', defaultProps);
+  const template = Template.fromStack(stack);
+
+  const synthesized = JSON.stringify(template.toJSON());
+  expect(synthesized).toContain('kafka-cluster:Connect');
+  expect(synthesized).toContain('kafka-cluster:CreateTopic');
+  expect(synthesized).toContain('kafka-cluster:ReadData');
+  expect(synthesized).toContain('kafka-cluster:DescribeGroup');
+  expect(synthesized).toContain('kafka-cluster:AlterGroup');
+  expect(synthesized).toContain('kafka-cluster:AlterTopic');
+});
+
+test('creates consumer log group', () => {
+  const app = new cdk.App();
+  const stack = new DataProcessingInfrastructure.DataProcessingInfrastructureStack(app, 'ConsumerLogGroupTest', defaultProps);
+  const template = Template.fromStack(stack);
+
+  const logGroups = template.findResources('AWS::Logs::LogGroup');
+  const consumerLogGroupKey = Object.keys(logGroups).find((key) =>
+    key.includes('ConsumerLogGroup'),
+  );
+  expect(consumerLogGroupKey).toBeDefined();
+});
+
+test('MSK security group allows ingress from consumer security group', () => {
+  const app = new cdk.App();
+  const stack = new DataProcessingInfrastructure.DataProcessingInfrastructureStack(app, 'ConsumerMskSgTest', defaultProps);
+  const template = Template.fromStack(stack);
+
+  const securityGroups = template.findResources('AWS::EC2::SecurityGroup');
+  const mskSgKey = Object.keys(securityGroups).find((key) =>
+    key.includes('MskBrokerSecurityGroup'),
+  );
+  expect(mskSgKey).toBeDefined();
+  const mskSg = securityGroups[mskSgKey!] as any;
+  const ingressRules = mskSg.Properties.SecurityGroupIngress || [];
+  const consumerIngressRules = ingressRules.filter(
+    (rule: any) => rule.Description?.includes('consumer'),
+  );
+  expect(consumerIngressRules.length).toBeGreaterThanOrEqual(1);
+  expect(consumerIngressRules[0].IpProtocol).toBe('tcp');
+  expect(consumerIngressRules[0].FromPort).toBe(9098);
+});
+
+test('consumer auto-scaling has CPU and memory targets', () => {
+  const app = new cdk.App();
+  const stack = new DataProcessingInfrastructure.DataProcessingInfrastructureStack(app, 'ConsumerScalingTest', defaultProps);
+  const template = Template.fromStack(stack);
+
+  const scalingPolicies = template.findResources('AWS::ApplicationAutoScaling::ScalableTarget');
+  const consumerScalingPolicies = Object.values(scalingPolicies).filter(
+    (sp: any) => JSON.stringify(sp).includes('KafkaConsumer'),
+  );
+  expect(consumerScalingPolicies.length).toBeGreaterThanOrEqual(1);
+});
+
+test('consumer image must be provided', () => {
+  const app = new cdk.App();
+  const prevEnv = { ...process.env };
+  Object.assign(process.env, {
+    PROCESSOR_IMAGE: TEST_PROCESSOR_IMAGE,
+    CONSUMER_IMAGE: '',
+  });
+  expect(() => resolveDeploymentConfig(app)).toThrow(
+    'consumerImage must be provided through CDK context or CONSUMER_IMAGE.',
+  );
+  process.env = prevEnv;
+});
+
+test('consumer image must be pinned to digest', () => {
+  const app = new cdk.App();
+  const prevEnv = { ...process.env };
+  Object.assign(process.env, {
+    PROCESSOR_IMAGE: TEST_PROCESSOR_IMAGE,
+    CONSUMER_IMAGE: '123456789012.dkr.ecr.eu-north-1.amazonaws.com/kafka-consumer:latest',
+  });
+  expect(() => resolveDeploymentConfig(app)).toThrow(
+    'consumerImage must be pinned to an image digest',
+  );
+  process.env = prevEnv;
+});
+
+test('rejects invalid consumer CPU', () => {
+  const app = new cdk.App();
+  const prevEnv = { ...process.env };
+  Object.assign(process.env, {
+    PROCESSOR_IMAGE: TEST_PROCESSOR_IMAGE,
+    CONSUMER_IMAGE: TEST_CONSUMER_IMAGE,
+    CONSUMER_CPU: '128',
+  });
+  expect(() => resolveDeploymentConfig(app)).toThrow(
+    'consumerCpu must be an integer >= 256.',
+  );
+  process.env = prevEnv;
+});
+
+test('rejects invalid consumer memory', () => {
+  const app = new cdk.App();
+  const prevEnv = { ...process.env };
+  Object.assign(process.env, {
+    PROCESSOR_IMAGE: TEST_PROCESSOR_IMAGE,
+    CONSUMER_IMAGE: TEST_CONSUMER_IMAGE,
+    CONSUMER_MEMORY: '256',
+  });
+  expect(() => resolveDeploymentConfig(app)).toThrow(
+    'consumerMemory must be an integer >= 512.',
+  );
+  process.env = prevEnv;
+});
+
+test('rejects invalid consumer desired count', () => {
+  const app = new cdk.App();
+  const prevEnv = { ...process.env };
+  Object.assign(process.env, {
+    PROCESSOR_IMAGE: TEST_PROCESSOR_IMAGE,
+    CONSUMER_IMAGE: TEST_CONSUMER_IMAGE,
+    CONSUMER_DESIRED_COUNT: '0',
+  });
+  expect(() => resolveDeploymentConfig(app)).toThrow(
+    'consumerDesiredCount must be a positive integer.',
+  );
+  process.env = prevEnv;
+});
+
+test('resolves consumer configuration from environment', () => {
+  const app = new cdk.App();
+  const prevEnv = { ...process.env };
+  Object.assign(process.env, {
+    PROCESSOR_IMAGE: TEST_PROCESSOR_IMAGE,
+    CONSUMER_IMAGE: TEST_CONSUMER_IMAGE,
+    CONSUMER_CPU: '1024',
+    CONSUMER_MEMORY: '2048',
+    CONSUMER_DESIRED_COUNT: '4',
+    MSK_CONSUMER_GROUP: 'custom-consumer-group',
+  });
+
+  const config = resolveDeploymentConfig(app);
+  expect(config.consumerImage).toBe(TEST_CONSUMER_IMAGE);
+  expect(config.consumerCpu).toBe(1024);
+  expect(config.consumerMemory).toBe(2048);
+  expect(config.consumerDesiredCount).toBe(4);
+  expect(config.mskConsumerGroup).toBe('custom-consumer-group');
+
+  process.env = prevEnv;
+});
+
+test('resolves consumer configuration from CDK context', () => {
+  const app = new cdk.App({
+    context: {
+      processorImage: TEST_PROCESSOR_IMAGE,
+      consumerImage: TEST_CONSUMER_IMAGE_CONTEXT,
+      consumerCpu: '2048',
+      consumerMemory: '4096',
+      consumerDesiredCount: '6',
+      mskConsumerGroup: 'context-consumer-group',
+    },
+  });
+
+  const config = resolveDeploymentConfig(app);
+  expect(config.consumerImage).toBe(TEST_CONSUMER_IMAGE_CONTEXT);
+  expect(config.consumerCpu).toBe(2048);
+  expect(config.consumerMemory).toBe(4096);
+  expect(config.consumerDesiredCount).toBe(6);
+  expect(config.mskConsumerGroup).toBe('context-consumer-group');
+});
+
+test('creates ProcessingEventsTable with TopicReceivedAt GSI', () => {
+  const app = new cdk.App();
+  const stack = new DataProcessingInfrastructure.DataProcessingInfrastructureStack(app, 'EventsTableTest', defaultProps);
+  const template = Template.fromStack(stack);
+
+  const tables = template.findResources('AWS::DynamoDB::Table');
+  const eventsTable = Object.values(tables).find((t: any) =>
+    t.Properties?.TableName?.includes('Events') || JSON.stringify(t.KeySchema).includes('EventId'),
+  ) as any;
+  expect(eventsTable).toBeDefined();
+  expect(eventsTable.Properties.BillingMode).toBe('PAY_PER_REQUEST');
+  expect(eventsTable.Properties.PointInTimeRecoverySpecification?.PointInTimeRecoveryEnabled).toBe(true);
+  expect(eventsTable.Properties.TimeToLiveSpecification?.AttributeName).toBe('Ttl');
+
+  const gsis = eventsTable.Properties.GlobalSecondaryIndexes || [];
+  expect(gsis.length).toBeGreaterThanOrEqual(1);
+  expect(gsis[0].IndexName).toBe('TopicReceivedAt');
+});
+
+test('consumer container has EVENTS_TABLE_NAME environment variable', () => {
+  const app = new cdk.App();
+  const stack = new DataProcessingInfrastructure.DataProcessingInfrastructureStack(app, 'ConsumerEnvEventsTest', defaultProps);
+  const template = Template.fromStack(stack);
+
+  const taskDefs = template.findResources('AWS::ECS::TaskDefinition');
+  const consumerTaskDef = Object.values(taskDefs).find((td: any) =>
+    JSON.stringify(td).includes('KafkaConsumerContainer'),
+  ) as any;
+  expect(consumerTaskDef).toBeDefined();
+
+  const containerDef = consumerTaskDef.Properties.ContainerDefinitions.find(
+    (c: any) => c.Name === 'KafkaConsumerContainer',
+  );
+  const envNames = containerDef.Environment.map((e: any) => e.Name);
+  expect(envNames).toContain('EVENTS_TABLE_NAME');
+});
+
+test('creates Athena workgroup with encryption', () => {
+  const app = new cdk.App();
+  const stack = new DataProcessingInfrastructure.DataProcessingInfrastructureStack(app, 'AthenaTest', defaultProps);
+  const template = Template.fromStack(stack);
+
+  template.hasResourceProperties('AWS::Athena::WorkGroup', {
+    Name: 'data-processing-analytics',
+    State: 'ENABLED',
+    Configuration: Match.objectLike({
+      EnforceWorkgroupConfiguration: true,
+      PublishCloudWatchMetricsEnabled: true,
+      ResultConfiguration: Match.objectLike({
+        EncryptionConfiguration: Match.objectLike({
+          EncryptionOption: 'SSE_KMS',
+        }),
+      }),
+    }),
+  });
+});
+
+test('creates Glue database for analytics', () => {
+  const app = new cdk.App();
+  const stack = new DataProcessingInfrastructure.DataProcessingInfrastructureStack(app, 'GlueTest', defaultProps);
+  const template = Template.fromStack(stack);
+
+  template.hasResourceProperties('AWS::Glue::Database', {
+    DatabaseInput: Match.objectLike({
+      Name: 'data_processing_analytics',
+    }),
+  });
+});
+
+test('creates Glue table for DynamoDB federated queries', () => {
+  const app = new cdk.App();
+  const stack = new DataProcessingInfrastructure.DataProcessingInfrastructureStack(app, 'GlueTableTest', defaultProps);
+  const template = Template.fromStack(stack);
+
+  template.hasResourceProperties('AWS::Glue::Table', {
+    TableInput: Match.objectLike({
+      Name: 'processing_events',
+      TableType: 'EXTERNAL_TABLE',
+    }),
+  });
+});
+
+test('creates Athena results bucket with KMS encryption', () => {
+  const app = new cdk.App();
+  const stack = new DataProcessingInfrastructure.DataProcessingInfrastructureStack(app, 'AthenaBucketTest', defaultProps);
+  const template = Template.fromStack(stack);
+
+  const buckets = template.findResources('AWS::S3::Bucket');
+  const athenaBucket = Object.values(buckets).find((b: any) =>
+    JSON.stringify(b).includes('AthenaResults'),
+  ) as any;
+  expect(athenaBucket).toBeDefined();
+  expect(athenaBucket.Properties.BucketEncryption).toBeDefined();
+  expect(athenaBucket.Properties.VersioningConfiguration).toEqual({
+    Status: 'Enabled',
+  });
 });

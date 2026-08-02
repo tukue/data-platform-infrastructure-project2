@@ -1,5 +1,5 @@
 {
-  "app": "npx ts-node --prefer-ts-exts --transpile-only bin/data-processing-infrastructure.ts",
+  "app": "node bin/data-processing-infrastructure.js",
   "watch": {
     "include": [
       "**"

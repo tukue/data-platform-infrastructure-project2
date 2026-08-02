@@ -34,10 +34,13 @@ jobs:
         run: npm test -- --runInBand
 
       - name: CDK synth
-        run: npx cdk synth --no-notices -c processorImage=000000000000.dkr.ecr.us-east-1.amazonaws.com/csv-processor@sha256:0000000000000000000000000000000000000000000000000000000000000000
+        run: >-
+          npx cdk synth --no-notices
+          -c processorImage=${{ vars.AWS_ACCOUNT_ID || '000000000000' }}.dkr.ecr.${{ vars.AWS_REGION || 'eu-west-1' }}.amazonaws.com/csv-processor@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          -c consumerImage=${{ vars.AWS_ACCOUNT_ID || '000000000000' }}.dkr.ecr.${{ vars.AWS_REGION || 'eu-west-1' }}.amazonaws.com/kafka-consumer@sha256:0000000000000000000000000000000000000000000000000000000000000000
         env:
-          CDK_DEFAULT_ACCOUNT: 000000000000
-          CDK_DEFAULT_REGION: us-east-1
+          CDK_DEFAULT_ACCOUNT: ${{ vars.AWS_ACCOUNT_ID || '000000000000' }}
+          CDK_DEFAULT_REGION: ${{ vars.AWS_REGION || 'eu-west-1' }}
 
       - name: Install OPA
         run: |

@@ -1,10 +1,12 @@
 import * as cdk from 'aws-cdk-lib';
+import * as athena from 'aws-cdk-lib/aws-athena';
 import * as cloudtrail from 'aws-cdk-lib/aws-cloudtrail';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
+import * as glue from 'aws-cdk-lib/aws-glue';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as kms from 'aws-cdk-lib/aws-kms';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
@@ -21,6 +23,7 @@ import { Construct } from 'constructs';
 
 export interface DataProcessingInfrastructureStackProps extends cdk.StackProps {
   processorImage: string;
+  consumerImage: string;
   rawFileRetentionDays: number;
   processedFileRetentionDays: number;
   failedFileRetentionDays: number;
@@ -28,6 +31,9 @@ export interface DataProcessingInfrastructureStackProps extends cdk.StackProps {
   jobRetentionDays: number;
   processorCpu: number;
   processorMemory: number;
+  consumerCpu: number;
+  consumerMemory: number;
+  consumerDesiredCount: number;
   logRetentionDays: number;
   mskClusterName: string;
   mskInstanceType: string;
@@ -37,6 +43,7 @@ export interface DataProcessingInfrastructureStackProps extends cdk.StackProps {
   mskSuccessTopic: string;
   mskFailureTopic: string;
   mskRetentionHours: number;
+  mskConsumerGroup: string;
 }
 
 function cdkLogRetention(days: number): logs.RetentionDays {
@@ -164,6 +171,29 @@ export class DataProcessingInfrastructureStack extends cdk.Stack {
         },
       ],
       versioned: true,
+    });
+
+    const eventsTable = new dynamodb.Table(this, 'ProcessingEventsTable', {
+      tableName: 'ProcessingEvents',
+      partitionKey: {
+        name: 'EventId',
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      encryption: dynamodb.TableEncryption.CUSTOMER_MANAGED,
+      encryptionKey: operationalKey,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      timeToLiveAttribute: 'Ttl',
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    eventsTable.addGlobalSecondaryIndex({
+      indexName: 'TopicReceivedAt',
+      partitionKey: { name: 'Topic', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'ReceivedAt', type: dynamodb.AttributeType.NUMBER },
+      projectionType: dynamodb.ProjectionType.ALL,
     });
 
     const jobTable = new dynamodb.Table(this, 'ProcessingJobsTable', {
@@ -359,6 +389,39 @@ export class DataProcessingInfrastructureStack extends cdk.Stack {
       'Allow Kafka IAM auth to MSK brokers.',
     );
 
+    const consumerSecurityGroup = new ec2.SecurityGroup(this, 'ConsumerTaskSecurityGroup', {
+      vpc,
+      allowAllOutbound: false,
+      description: 'Restricts consumer task egress to DNS, HTTPS, and Kafka.',
+    });
+
+    consumerSecurityGroup.addEgressRule(
+      ec2.Peer.ipv4(vpc.vpcCidrBlock),
+      ec2.Port.tcp(53),
+      'Allow DNS over TCP to the VPC resolver.',
+    );
+    consumerSecurityGroup.addEgressRule(
+      ec2.Peer.ipv4(vpc.vpcCidrBlock),
+      ec2.Port.udp(53),
+      'Allow DNS over UDP to the VPC resolver.',
+    );
+    consumerSecurityGroup.addEgressRule(
+      ec2.Peer.ipv4(vpc.vpcCidrBlock),
+      ec2.Port.tcp(443),
+      'Allow HTTPS to VPC CIDR for interface endpoint traffic.',
+    );
+    consumerSecurityGroup.addEgressRule(
+      mskBrokerSecurityGroup,
+      ec2.Port.tcp(9098),
+      'Allow Kafka IAM auth to MSK brokers.',
+    );
+
+    mskBrokerSecurityGroup.addIngressRule(
+      ec2.Peer.securityGroupId(consumerSecurityGroup.securityGroupId),
+      ec2.Port.tcp(9098),
+      'Allow Kafka IAM auth from consumer tasks.',
+    );
+
     const mskCluster = new msk.CfnCluster(this, 'StreamingCluster', {
       clusterName: props.mskClusterName,
       kafkaVersion: props.mskKafkaVersion,
@@ -400,57 +463,6 @@ export class DataProcessingInfrastructureStack extends cdk.Stack {
         },
       },
     });
-
-    const mskTopicProviderFunction = new lambda.Function(this, 'MskTopicProviderFunction', {
-      runtime: lambda.Runtime.PYTHON_3_12,
-      handler: 'index.handler',
-      code: lambda.Code.fromInline(`
-import json
-import os
-import urllib3
-
-def handler(event, context):
-    msk = __import__('boto3').client('kafka')
-    cluster_arn = event['ResourceProperties']['ClusterArn']
-    topics = event['ResourceProperties']['Topics']
-    retention_ms = event['ResourceProperties']['RetentionMs']
-
-    if event['RequestType'] == 'Delete':
-        return {'PhysicalResourceId': 'msk-topics'}
-
-    desc = msk.describe_cluster(ClusterArn=cluster_arn)
-    bootstrap = desc['ClusterInfo']['BootstrapBrokerStringSaslIam']
-    if not bootstrap:
-        raise Exception('Could not retrieve bootstrap servers')
-
-    brokers = bootstrap.split(',')[0].split(':')[0]
-    port = bootstrap.split(':')[1].split('/')[0] if ':' in bootstrap.split(',')[1] else '9098'
-
-    return {'PhysicalResourceId': 'msk-topics'}
-      `),
-      environment: {
-        MSK_CLUSTER_ARN: mskCluster.attrArn,
-      },
-      timeout: cdk.Duration.minutes(2),
-      vpc,
-      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-      securityGroups: [mskBrokerSecurityGroup],
-    });
-
-    mskTopicProviderFunction.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['kafka-cluster:Connect', 'kafka-cluster:DescribeCluster'],
-      resources: [mskCluster.attrArn],
-    }));
-
-    const mskTopicCustomResource = new cdk.CustomResource(this, 'MskTopics', {
-      serviceToken: mskTopicProviderFunction.functionArn,
-      properties: {
-        ClusterArn: mskCluster.attrArn,
-        Topics: [props.mskSuccessTopic, props.mskFailureTopic],
-        RetentionMs: props.mskRetentionHours * 60 * 60 * 1000,
-      },
-    });
-    mskTopicCustomResource.node.addDependency(mskCluster);
 
     const cluster = new ecs.Cluster(this, 'ProcessingCluster', {
       vpc,
@@ -782,5 +794,173 @@ def handler(event, context):
       ],
       { readWriteType: cloudtrail.ReadWriteType.ALL },
     );
+
+    // ── Kafka Consumer ────────────────────────────────────────────────────
+
+    const consumerLogGroup = new logs.LogGroup(this, 'ConsumerLogGroup', {
+      encryptionKey: operationalKey,
+      retention: logRetention,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    const consumerTaskDefinition = new ecs.FargateTaskDefinition(this, 'ConsumerTaskDefinition', {
+      cpu: props.consumerCpu,
+      memoryLimitMiB: props.consumerMemory,
+    });
+
+    const consumerContainer = consumerTaskDefinition.addContainer('KafkaConsumerContainer', {
+      image: ecs.ContainerImage.fromRegistry(props.consumerImage),
+      logging: ecs.LogDrivers.awsLogs({
+        streamPrefix: 'kafka-consumer',
+        logGroup: consumerLogGroup,
+      }),
+      readonlyRootFilesystem: true,
+      user: '65534:65534',
+      environment: {
+        MSK_BOOTSTRAP_SERVERS: mskCluster.getAtt('BootstrapBrokerStringSaslIam').toString(),
+        KAFKA_SUCCESS_TOPIC: props.mskSuccessTopic,
+        KAFKA_FAILURE_TOPIC: props.mskFailureTopic,
+        KAFKA_CONSUMER_GROUP: props.mskConsumerGroup,
+        KAFKA_TOPIC_PARTITIONS: '3',
+        KAFKA_TOPIC_REPLICATION_FACTOR: String(Math.min(3, props.mskNumberOfBrokerNodes)),
+        EVENTS_TABLE_NAME: eventsTable.tableName,
+      },
+    });
+
+    consumerTaskDefinition.executionRole?.addToPrincipalPolicy(new iam.PolicyStatement({
+      actions: [
+        'ecr:GetAuthorizationToken',
+        'ecr:BatchCheckLayerAvailability',
+        'ecr:GetDownloadUrlForLayer',
+        'ecr:BatchGetImage',
+      ],
+      resources: ['*'],
+    }));
+
+    consumerTaskDefinition.taskRole.addToPrincipalPolicy(new iam.PolicyStatement({
+      actions: [
+        'kafka-cluster:Connect',
+        'kafka-cluster:CreateTopic',
+        'kafka-cluster:DescribeTopic',
+        'kafka-cluster:ReadData',
+        'kafka-cluster:DescribeGroup',
+        'kafka-cluster:AlterGroup',
+        'kafka-cluster:AlterTopic',
+      ],
+      resources: [mskCluster.attrArn],
+    }));
+
+    eventsTable.grantWriteData(consumerTaskDefinition.taskRole);
+    processedFilesBucket.grantRead(consumerTaskDefinition.taskRole);
+    failedFilesBucket.grantRead(consumerTaskDefinition.taskRole);
+
+    const consumerService = new ecs.FargateService(this, 'KafkaConsumerService', {
+      cluster,
+      taskDefinition: consumerTaskDefinition,
+      desiredCount: props.consumerDesiredCount,
+      assignPublicIp: false,
+      securityGroups: [consumerSecurityGroup],
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      enableExecuteCommand: true,
+      platformVersion: ecs.FargatePlatformVersion.LATEST,
+    });
+
+    consumerService.node.addDependency(mskCluster);
+
+    const scaling = consumerService.autoScaleTaskCount({
+      minCapacity: props.consumerDesiredCount,
+      maxCapacity: props.consumerDesiredCount * 4,
+    });
+
+    scaling.scaleOnCpuUtilization('ConsumerCpuScaling', {
+      targetUtilizationPercent: 70,
+      scaleInCooldown: cdk.Duration.seconds(120),
+      scaleOutCooldown: cdk.Duration.seconds(60),
+    });
+
+    scaling.scaleOnMemoryUtilization('ConsumerMemoryScaling', {
+      targetUtilizationPercent: 70,
+      scaleInCooldown: cdk.Duration.seconds(120),
+      scaleOutCooldown: cdk.Duration.seconds(60),
+    });
+
+    // ── Athena Analytics ─────────────────────────────────────────────────
+
+    const athenaResultsBucket = new s3.Bucket(this, 'AthenaResultsBucket', {
+      bucketName: cdk.Fn.join('-', [cdk.Aws.ACCOUNT_ID, 'AthenaResults']),
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.KMS,
+      encryptionKey: storageKey,
+      enforceSSL: true,
+      objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+      lifecycleRules: [
+        {
+          expiration: cdk.Duration.days(7),
+          transitions: [],
+        },
+      ],
+      versioned: true,
+    });
+
+    const athenaWorkgroup = new athena.CfnWorkGroup(this, 'AnalyticsWorkgroup', {
+      name: 'data-processing-analytics',
+      description: 'Workgroup for analytics queries against processing events.',
+      state: 'ENABLED',
+    });
+    athenaWorkgroup.addPropertyOverride('Configuration', {
+      ResultConfiguration: {
+        OutputLocation: `s3://${athenaResultsBucket.bucketName}/query-results/`,
+        EncryptionConfiguration: {
+          EncryptionOption: 'SSE_KMS',
+          KmsKey: storageKey.keyArn,
+        },
+      },
+      EnforceWorkgroupConfiguration: true,
+      PublishCloudWatchMetricsEnabled: true,
+    });
+
+    const glueDatabase = new glue.CfnDatabase(this, 'AnalyticsGlueDatabase', {
+      catalogId: cdk.Aws.ACCOUNT_ID,
+      databaseInput: {
+        name: 'data_processing_analytics',
+        description: 'Glue catalog for Athena analytics on processing events.',
+      },
+    });
+
+    new glue.CfnTable(this, 'ProcessingEventsGlueTable', {
+      catalogId: cdk.Aws.ACCOUNT_ID,
+      databaseName: glueDatabase.ref,
+      tableInput: {
+        name: 'processing_events',
+        description: 'External table mapping the DynamoDB ProcessingEventsTable for Athena federated queries.',
+        storageDescriptor: {
+          columns: [
+            { name: 'eventid', type: 'string' },
+            { name: 'topic', type: 'string' },
+            { name: 'partition', type: 'int' },
+            { name: 'offset', type: 'bigint' },
+            { name: 'receivedat', type: 'bigint' },
+            { name: 'messagekey', type: 'string' },
+            { name: 'payload', type: 'string' },
+            { name: 'headers', type: 'map<string,string>' },
+          ],
+          location: `dynamodb://${eventsTable.tableName}`,
+          inputFormat: 'org.apache.hadoop.hive.dynamodb.DynamoDBInputFormat',
+          outputFormat: 'org.apache.hadoop.hive.dynamodb.DynamoDBOutputFormat',
+          serdeInfo: {
+            serializationLibrary: 'org.apache.hadoop.hive.dynamodb.DynamoDBSerDe',
+          },
+        },
+        tableType: 'EXTERNAL_TABLE',
+        parameters: {
+          'dynamodb.table': eventsTable.tableName,
+          'dynamodb.region': cdk.Aws.REGION,
+        },
+      },
+    });
+
+    athenaWorkgroup.addDependency(glueDatabase);
   }
 }
