@@ -9,6 +9,7 @@ npm install
 npm run build   # TypeScript compilation
 npm test        # Run Jest tests
 npx cdk synth   # Synthesize CloudFormation template
+cd consumer && python -m pytest tests  # Run Python consumer tests
 ```
 
 ## CI Pipeline

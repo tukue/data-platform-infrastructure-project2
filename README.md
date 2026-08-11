@@ -244,6 +244,7 @@ Every pull request validates:
 
 - TypeScript compilation
 - Jest infrastructure tests
+- Python consumer tests
 - CDK synthesis
 - OPA policy evaluation against synthesized CloudFormation
 
