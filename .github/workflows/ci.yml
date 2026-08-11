@@ -84,7 +84,7 @@ jobs:
 
       - name: Upload infrastructure validation evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: infrastructure-validation-${{ github.sha }}
           path: |
