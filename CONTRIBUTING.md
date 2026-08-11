@@ -23,6 +23,10 @@ Every push and pull request runs:
 
 Make sure all five steps pass before requesting review.
 
+CI retains the synthesized template and OPA output for seven days, including
+on failed runs. Download the `infrastructure-validation-*` artifact from the
+workflow run when investigating a validation failure.
+
 ## Policy Checks
 
 OPA (Open Policy Agent) policies live in `policy/`. They are evaluated against

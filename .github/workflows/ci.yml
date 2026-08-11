@@ -9,10 +9,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   validate:
     name: Build, test, and synth
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -62,3 +67,14 @@ jobs:
             exit 1
           fi
           echo "OPA check complete. Violations: $VIOLATIONS"
+
+      - name: Upload infrastructure validation evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: infrastructure-validation-${{ github.sha }}
+          path: |
+            cdk.out/*.template.json
+            opa-results.json
+          if-no-files-found: warn
+          retention-days: 7

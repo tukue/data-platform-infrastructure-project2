@@ -244,9 +244,14 @@ Every pull request validates:
 
 - TypeScript compilation
 - Jest infrastructure tests
-- Python consumer tests
 - CDK synthesis
 - OPA policy evaluation against synthesized CloudFormation
+
+CI cancels superseded runs for the same branch, has a 20-minute execution
+limit, and retains the synthesized CloudFormation template and OPA result for
+seven days. This gives reviewers a self-service record of the infrastructure
+that was validated. Dependabot also opens weekly pull requests for npm and
+GitHub Actions dependency updates.
 
 The CI region is configurable through GitHub repository variables:
 
