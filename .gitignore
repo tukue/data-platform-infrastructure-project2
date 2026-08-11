@@ -13,6 +13,11 @@ cdk.out.*/
 
 # Test and coverage output
 coverage/
+.pytest_cache/
+__pycache__/
+
+# Python virtual environments
+.venv/
 
 # Local environment and logs
 .env

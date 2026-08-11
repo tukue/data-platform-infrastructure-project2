@@ -9,6 +9,7 @@ npm install
 npm run build   # TypeScript compilation
 npm test        # Run Jest tests
 npx cdk synth   # Synthesize CloudFormation template
+cd consumer && python -m pytest tests  # Run Python consumer tests
 ```
 
 ## CI Pipeline
@@ -22,6 +23,10 @@ Every push and pull request runs:
 5. `opa eval` — OPA policy checks against synthesized CloudFormation
 
 Make sure all five steps pass before requesting review.
+
+CI retains the synthesized template and OPA output for seven days, including
+on failed runs. Download the `infrastructure-validation-*` artifact from the
+workflow run when investigating a validation failure.
 
 ## Policy Checks
 
