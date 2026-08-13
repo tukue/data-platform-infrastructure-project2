@@ -252,7 +252,9 @@ CI cancels superseded runs for the same branch, has a 20-minute execution
 limit, and retains the synthesized CloudFormation template and OPA result for
 seven days. This gives reviewers a self-service record of the infrastructure
 that was validated. Dependabot also opens weekly pull requests for npm and
-GitHub Actions dependency updates.
+Python, and GitHub Actions dependency updates. A separate security workflow
+reviews pull-request dependency changes and runs weekly CodeQL analysis across
+the TypeScript and Python codebases.
 
 The CI region is configurable through GitHub repository variables:
 
