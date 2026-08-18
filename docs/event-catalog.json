@@ -27,7 +27,11 @@
         "format": "JSON",
         "status": "not-defined",
         "location": null,
-        "notes": "The consumer stores the producer payload as opaque JSON; no versioned schema is present in this repository."
+        "notes": "No versioned schema is present. The producer contract requires job_id, raw_bucket, object_key, and execution_name for upload correlation."
+      },
+      "correlation": {
+        "messageKey": "job_id",
+        "payloadFields": ["job_id", "raw_bucket", "object_key", "execution_name"]
       },
       "owner": {
         "status": "unassigned",
@@ -60,7 +64,11 @@
         "format": "JSON",
         "status": "not-defined",
         "location": null,
-        "notes": "The consumer stores the producer payload as opaque JSON; no versioned schema is present in this repository."
+        "notes": "No versioned schema is present. The producer contract requires job_id, raw_bucket, object_key, and execution_name for upload correlation."
+      },
+      "correlation": {
+        "messageKey": "job_id",
+        "payloadFields": ["job_id", "raw_bucket", "object_key", "execution_name"]
       },
       "owner": {
         "status": "unassigned",

@@ -18,6 +18,35 @@ this repository. The in-repository consumer in `consumer/app.py` subscribes to
 both configured topics, stores Kafka metadata and the JSON payload in DynamoDB,
 then commits the offset after a successful write.
 
+## Upload Correlation
+
+Each S3 upload has a deterministic `JobId`:
+
+```text
+<raw-bucket>#<object-key>#<s3-sequencer>
+```
+
+The stack passes that value to the processor as `JOB_ID`, alongside
+`EXECUTION_NAME`, `RAW_BUCKET`, and `OBJECT_KEY`. The producer must include the
+following string fields in each outcome event and use `job_id` as the Kafka
+message key:
+
+```json
+{
+  "job_id": "<raw-bucket>#<object-key>#<s3-sequencer>",
+  "raw_bucket": "<raw-bucket>",
+  "object_key": "<object-key>",
+  "execution_name": "<step-functions-execution-name>"
+}
+```
+
+The consumer persists these fields as `JobId`, `RawBucket`, `ObjectKey`, and
+`ExecutionName`. Query `ProcessingEvents` through its `JobIdReceivedAt` index
+to trace an upload from the job record to its Kafka events. Older events that do
+not contain these fields remain supported but are not queryable through this
+index. The same fields are available to Athena as `jobid`, `rawbucket`,
+`objectkey`, and `executionname`.
+
 ## Event Inventory
 
 | Event and default topic | Producer | Consumer | Schema | Owner |

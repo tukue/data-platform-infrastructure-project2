@@ -56,6 +56,12 @@ THROTTLE_ERRORS = {
 }
 MAX_DYNAMO_RETRIES = 5
 MAX_DYNAMO_BACKOFF_SECONDS = 8
+CORRELATION_FIELDS = {
+    "job_id": "JobId",
+    "raw_bucket": "RawBucket",
+    "object_key": "ObjectKey",
+    "execution_name": "ExecutionName",
+}
 
 
 class TableWriter(Protocol):
@@ -85,6 +91,11 @@ def _handle_record(record: dict, writer: TableWriter) -> None:
 
     if record.get("headers"):
         item["Headers"] = record["headers"]
+
+    for payload_field, item_field in CORRELATION_FIELDS.items():
+        value = payload.get(payload_field)
+        if isinstance(value, str) and value:
+            item[item_field] = value
 
     for attempt in range(MAX_DYNAMO_RETRIES):
         try:
