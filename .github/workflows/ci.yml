@@ -52,6 +52,9 @@ jobs:
         working-directory: consumer
         run: python -m pytest tests
 
+      - name: Validate event catalog
+        run: npm run validate:event-catalog
+
       - name: CDK synth
         run: >-
           npx cdk synth --no-notices

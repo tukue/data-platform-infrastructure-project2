@@ -1,0 +1,71 @@
+{
+  "catalogVersion": "1.0",
+  "events": [
+    {
+      "id": "processing.succeeded",
+      "domain": "data-processing",
+      "description": "Signals that the CSV processor completed a processing job successfully.",
+      "producer": {
+        "component": "CSV processor ECS task",
+        "implementation": "External digest-pinned container image configured by processorImage; source is not in this repository."
+      },
+      "topic": {
+        "default": "processing.succeeded",
+        "configuration": {
+          "cdkContext": "mskSuccessTopic",
+          "environmentVariable": "MSK_SUCCESS_TOPIC"
+        }
+      },
+      "consumers": [
+        {
+          "component": "Kafka consumer ECS service",
+          "consumerGroup": "data-processing-consumer",
+          "implementation": "consumer/app.py"
+        }
+      ],
+      "schema": {
+        "format": "JSON",
+        "status": "not-defined",
+        "location": null,
+        "notes": "The consumer stores the producer payload as opaque JSON; no versioned schema is present in this repository."
+      },
+      "owner": {
+        "status": "unassigned",
+        "team": null
+      }
+    },
+    {
+      "id": "processing.failed",
+      "domain": "data-processing",
+      "description": "Signals that the CSV processor could not complete a processing job.",
+      "producer": {
+        "component": "CSV processor ECS task",
+        "implementation": "External digest-pinned container image configured by processorImage; source is not in this repository."
+      },
+      "topic": {
+        "default": "processing.failed",
+        "configuration": {
+          "cdkContext": "mskFailureTopic",
+          "environmentVariable": "MSK_FAILURE_TOPIC"
+        }
+      },
+      "consumers": [
+        {
+          "component": "Kafka consumer ECS service",
+          "consumerGroup": "data-processing-consumer",
+          "implementation": "consumer/app.py"
+        }
+      ],
+      "schema": {
+        "format": "JSON",
+        "status": "not-defined",
+        "location": null,
+        "notes": "The consumer stores the producer payload as opaque JSON; no versioned schema is present in this repository."
+      },
+      "owner": {
+        "status": "unassigned",
+        "team": null
+      }
+    }
+  ]
+}

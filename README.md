@@ -114,6 +114,9 @@ flowchart LR
 - Broker logs routed to CloudWatch
 - Security group rules for private VPC access
 
+See [the event streaming guide](docs/event-streaming.md) for the discoverable
+producer, topic, consumer, schema, and ownership inventory.
+
 ### Kafka Consumer
 
 - ECS Fargate service for consuming Kafka processing events
