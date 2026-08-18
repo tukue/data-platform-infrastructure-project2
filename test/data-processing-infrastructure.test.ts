@@ -997,10 +997,10 @@ test('creates Glue table for DynamoDB federated queries', () => {
       TableType: 'EXTERNAL_TABLE',
       StorageDescriptor: Match.objectLike({
         Columns: Match.arrayWith([
-          { name: 'jobid', type: 'string' },
-          { name: 'rawbucket', type: 'string' },
-          { name: 'objectkey', type: 'string' },
-          { name: 'executionname', type: 'string' },
+          { Name: 'jobid', Type: 'string' },
+          { Name: 'rawbucket', Type: 'string' },
+          { Name: 'objectkey', Type: 'string' },
+          { Name: 'executionname', Type: 'string' },
         ]),
       }),
     }),
