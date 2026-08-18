@@ -901,7 +901,7 @@ test('resolves consumer configuration from CDK context', () => {
   expect(config.mskConsumerGroup).toBe('context-consumer-group');
 });
 
-test('creates ProcessingEventsTable with TopicReceivedAt GSI', () => {
+test('creates ProcessingEventsTable with topic and job correlation indexes', () => {
   const app = new cdk.App();
   const stack = new DataProcessingInfrastructure.DataProcessingInfrastructureStack(app, 'EventsTableTest', defaultProps);
   const template = Template.fromStack(stack);
@@ -916,8 +916,10 @@ test('creates ProcessingEventsTable with TopicReceivedAt GSI', () => {
   expect(eventsTable.Properties.TimeToLiveSpecification?.AttributeName).toBe('Ttl');
 
   const gsis = eventsTable.Properties.GlobalSecondaryIndexes || [];
-  expect(gsis.length).toBeGreaterThanOrEqual(1);
-  expect(gsis[0].IndexName).toBe('TopicReceivedAt');
+  expect(gsis).toEqual(expect.arrayContaining([
+    expect.objectContaining({ IndexName: 'TopicReceivedAt' }),
+    expect.objectContaining({ IndexName: 'JobIdReceivedAt' }),
+  ]));
 });
 
 test('consumer container has EVENTS_TABLE_NAME environment variable', () => {
@@ -936,6 +938,20 @@ test('consumer container has EVENTS_TABLE_NAME environment variable', () => {
   );
   const envNames = containerDef.Environment.map((e: any) => e.Name);
   expect(envNames).toContain('EVENTS_TABLE_NAME');
+});
+
+test('passes upload correlation context to the processor task', () => {
+  const app = new cdk.App();
+  const stack = new DataProcessingInfrastructure.DataProcessingInfrastructureStack(app, 'ProcessorCorrelationTest', defaultProps);
+  const template = Template.fromStack(stack);
+  const stateMachines = template.findResources('AWS::StepFunctions::StateMachine');
+  const definition = JSON.stringify(stateMachines);
+
+  expect(definition).toContain('JOB_ID');
+  expect(definition).toContain('EXECUTION_NAME');
+  expect(definition).toContain('RAW_BUCKET');
+  expect(definition).toContain('OBJECT_KEY');
+  expect(definition).toContain('$.detail.object.sequencer');
 });
 
 test('creates Athena workgroup with encryption', () => {
@@ -979,6 +995,14 @@ test('creates Glue table for DynamoDB federated queries', () => {
     TableInput: Match.objectLike({
       Name: 'processing_events',
       TableType: 'EXTERNAL_TABLE',
+      StorageDescriptor: Match.objectLike({
+        Columns: Match.arrayWith([
+          { Name: 'jobid', Type: 'string' },
+          { Name: 'rawbucket', Type: 'string' },
+          { Name: 'objectkey', Type: 'string' },
+          { Name: 'executionname', Type: 'string' },
+        ]),
+      }),
     }),
   });
 });

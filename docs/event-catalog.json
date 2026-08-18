@@ -1,0 +1,79 @@
+{
+  "catalogVersion": "1.0",
+  "events": [
+    {
+      "id": "processing.succeeded",
+      "domain": "data-processing",
+      "description": "Signals that the CSV processor completed a processing job successfully.",
+      "producer": {
+        "component": "CSV processor ECS task",
+        "implementation": "External digest-pinned container image configured by processorImage; source is not in this repository."
+      },
+      "topic": {
+        "default": "processing.succeeded",
+        "configuration": {
+          "cdkContext": "mskSuccessTopic",
+          "environmentVariable": "MSK_SUCCESS_TOPIC"
+        }
+      },
+      "consumers": [
+        {
+          "component": "Kafka consumer ECS service",
+          "consumerGroup": "data-processing-consumer",
+          "implementation": "consumer/app.py"
+        }
+      ],
+      "schema": {
+        "format": "JSON",
+        "status": "not-defined",
+        "location": null,
+        "notes": "No versioned schema is present. The producer contract requires job_id, raw_bucket, object_key, and execution_name for upload correlation."
+      },
+      "correlation": {
+        "messageKey": "job_id",
+        "payloadFields": ["job_id", "raw_bucket", "object_key", "execution_name"]
+      },
+      "owner": {
+        "status": "unassigned",
+        "team": null
+      }
+    },
+    {
+      "id": "processing.failed",
+      "domain": "data-processing",
+      "description": "Signals that the CSV processor could not complete a processing job.",
+      "producer": {
+        "component": "CSV processor ECS task",
+        "implementation": "External digest-pinned container image configured by processorImage; source is not in this repository."
+      },
+      "topic": {
+        "default": "processing.failed",
+        "configuration": {
+          "cdkContext": "mskFailureTopic",
+          "environmentVariable": "MSK_FAILURE_TOPIC"
+        }
+      },
+      "consumers": [
+        {
+          "component": "Kafka consumer ECS service",
+          "consumerGroup": "data-processing-consumer",
+          "implementation": "consumer/app.py"
+        }
+      ],
+      "schema": {
+        "format": "JSON",
+        "status": "not-defined",
+        "location": null,
+        "notes": "No versioned schema is present. The producer contract requires job_id, raw_bucket, object_key, and execution_name for upload correlation."
+      },
+      "correlation": {
+        "messageKey": "job_id",
+        "payloadFields": ["job_id", "raw_bucket", "object_key", "execution_name"]
+      },
+      "owner": {
+        "status": "unassigned",
+        "team": null
+      }
+    }
+  ]
+}

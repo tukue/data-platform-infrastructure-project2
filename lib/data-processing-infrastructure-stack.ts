@@ -196,6 +196,13 @@ export class DataProcessingInfrastructureStack extends cdk.Stack {
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
+    eventsTable.addGlobalSecondaryIndex({
+      indexName: 'JobIdReceivedAt',
+      partitionKey: { name: 'JobId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'ReceivedAt', type: dynamodb.AttributeType.NUMBER },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
     const jobTable = new dynamodb.Table(this, 'ProcessingJobsTable', {
       partitionKey: {
         name: 'JobId',
@@ -573,6 +580,13 @@ export class DataProcessingInfrastructureStack extends cdk.Stack {
     denyNonTaskRoleAccess(processedFilesBucket, ['s3:GetObject', 's3:GetObjectVersion', 's3:PutObject', 's3:DeleteObject']);
     denyNonTaskRoleAccess(failedFilesBucket, ['s3:GetObject', 's3:GetObjectVersion', 's3:PutObject', 's3:DeleteObject']);
 
+    const jobId = sfn.JsonPath.format(
+      '{}#{}#{}',
+      sfn.JsonPath.stringAt('$.detail.bucket.name'),
+      sfn.JsonPath.stringAt('$.detail.object.key'),
+      sfn.JsonPath.stringAt('$.detail.object.sequencer'),
+    );
+
     const runProcessorTask = new tasks.EcsRunTask(this, 'RunCsvProcessorTask', {
       integrationPattern: sfn.IntegrationPattern.RUN_JOB,
       cluster,
@@ -589,6 +603,10 @@ export class DataProcessingInfrastructureStack extends cdk.Stack {
           environment: [
             {
               name: 'JOB_ID',
+              value: jobId,
+            },
+            {
+              name: 'EXECUTION_NAME',
               value: sfn.JsonPath.stringAt('$$.Execution.Name'),
             },
             {
@@ -624,13 +642,6 @@ export class DataProcessingInfrastructureStack extends cdk.Stack {
         'detail.$': '$.detail',
       },
     });
-
-    const jobId = sfn.JsonPath.format(
-      '{}#{}#{}',
-      sfn.JsonPath.stringAt('$.detail.bucket.name'),
-      sfn.JsonPath.stringAt('$.detail.object.key'),
-      sfn.JsonPath.stringAt('$.detail.object.sequencer'),
-    );
 
     const markJobStarted = new tasks.DynamoPutItem(this, 'MarkJobStarted', {
       table: jobTable,
@@ -945,6 +956,10 @@ export class DataProcessingInfrastructureStack extends cdk.Stack {
             { name: 'messagekey', type: 'string' },
             { name: 'payload', type: 'string' },
             { name: 'headers', type: 'map<string,string>' },
+            { name: 'jobid', type: 'string' },
+            { name: 'rawbucket', type: 'string' },
+            { name: 'objectkey', type: 'string' },
+            { name: 'executionname', type: 'string' },
           ],
           location: `dynamodb://${eventsTable.tableName}`,
           inputFormat: 'org.apache.hadoop.hive.dynamodb.DynamoDBInputFormat',

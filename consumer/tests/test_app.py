@@ -45,6 +45,34 @@ class TestHandleRecord:
         assert "EventId" in item
         assert "ReceivedAt" in item
 
+    def test_persists_upload_correlation_fields(self) -> None:
+        writer = MagicMock()
+        record = _make_record(value={
+            "job_id": "raw-uploads#customers.csv#001",
+            "raw_bucket": "raw-uploads",
+            "object_key": "customers.csv",
+            "execution_name": "csv-processing-execution",
+        })
+
+        _handle_record(record, writer)
+
+        item = writer.put_item.call_args[1]["Item"]
+        assert item["JobId"] == "raw-uploads#customers.csv#001"
+        assert item["RawBucket"] == "raw-uploads"
+        assert item["ObjectKey"] == "customers.csv"
+        assert item["ExecutionName"] == "csv-processing-execution"
+
+    def test_omits_missing_upload_correlation_fields(self) -> None:
+        writer = MagicMock()
+
+        _handle_record(writer=writer, record=_make_record(value={"status": "ok"}))
+
+        item = writer.put_item.call_args[1]["Item"]
+        assert "JobId" not in item
+        assert "RawBucket" not in item
+        assert "ObjectKey" not in item
+        assert "ExecutionName" not in item
+
     def test_writes_none_payload(self) -> None:
         writer = MagicMock()
         record = _make_record(value=None)
