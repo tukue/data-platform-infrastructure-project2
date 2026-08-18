@@ -27,18 +27,10 @@ Each S3 upload has a deterministic `JobId`:
 ```
 
 The stack passes that value to the processor as `JOB_ID`, alongside
-`EXECUTION_NAME`, `RAW_BUCKET`, and `OBJECT_KEY`. The producer must include the
-following string fields in each outcome event and use `job_id` as the Kafka
-message key:
-
-```json
-{
-  "job_id": "<raw-bucket>#<object-key>#<s3-sequencer>",
-  "raw_bucket": "<raw-bucket>",
-  "object_key": "<object-key>",
-  "execution_name": "<step-functions-execution-name>"
-}
-```
+`EXECUTION_NAME`, `RAW_BUCKET`, and `OBJECT_KEY`. The producer must include a
+stable correlation envelope in every outcome event and use its upload identifier
+as the Kafka message key. The exact field contract is kept in the
+machine-readable event catalog.
 
 The consumer persists these fields as `JobId`, `RawBucket`, `ObjectKey`, and
 `ExecutionName`. Query `ProcessingEvents` through its `JobIdReceivedAt` index
@@ -46,6 +38,22 @@ to trace an upload from the job record to its Kafka events. Older events that do
 not contain these fields remain supported but are not queryable through this
 index. The same fields are available to Athena as `jobid`, `rawbucket`,
 `objectkey`, and `executionname`.
+
+## Change Handoff and Next Improvement
+
+This repository now provides the correlation path from an S3 upload to a
+persisted Kafka event: it creates the deterministic `JobId`, passes it to the
+processor, stores it in `ProcessingEvents`, and indexes events by job and
+receive time. Existing events without correlation fields continue to be stored
+without interruption.
+
+The next focused improvement is in the external CSV processor repository. It
+must publish the four documented correlation fields and set the Kafka message
+key to `job_id`. After that rollout, validate one upload by looking up its
+`JobId` in `ProcessingJobs` and querying `ProcessingEvents.JobIdReceivedAt`.
+
+Versioned event schemas and any schema registry remain separate future work;
+they are not required for this correlation rollout.
 
 ## Event Inventory
 
