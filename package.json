@@ -38,10 +38,10 @@
   "devDependencies": {
     "@types/jest": "^30",
     "@types/node": "^24.10.1",
-    "aws-cdk": "2.1122.0",
+    "aws-cdk": "2.1138.0",
     "cdk-nag": "^2.38.2",
     "jest": "^30",
-    "jsonschema": "^1.4.1",
+    "jsonschema": "^1.5.0",
     "ts-jest": "^29",
     "ts-node": "^10.9.2",
     "typescript": "~5.9.3"
