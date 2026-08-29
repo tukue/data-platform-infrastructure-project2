@@ -922,6 +922,51 @@ test('creates ProcessingEventsTable with topic and job correlation indexes', () 
   ]));
 });
 
+test('creates a self-contained authenticated customer upload API', () => {
+  const app = new cdk.App();
+  const stack = new DataProcessingInfrastructure.DataProcessingInfrastructureStack(app, 'CustomerUploadApiTest', defaultProps);
+  const template = Template.fromStack(stack);
+
+  template.hasResourceProperties('AWS::Cognito::UserPool', {
+    AutoVerifiedAttributes: ['email'],
+    UsernameConfiguration: { CaseSensitive: false },
+  });
+  template.hasResourceProperties('AWS::Cognito::UserPoolClient', {
+    GenerateSecret: false,
+    PreventUserExistenceErrors: 'ENABLED',
+  });
+  template.hasResourceProperties('AWS::ApiGateway::RestApi', {
+    EndpointConfiguration: { Types: ['REGIONAL'] },
+  });
+  template.hasResourceProperties('AWS::ApiGateway::Method', {
+    AuthorizationType: 'COGNITO_USER_POOLS',
+    HttpMethod: 'POST',
+  });
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Handler: 'index.handler',
+    Runtime: 'python3.12',
+    Code: Match.objectLike({
+      ZipFile: Match.stringLikeRegexp('create_multipart_upload'),
+    }),
+    Environment: Match.objectLike({
+      Variables: Match.objectLike({
+        RAW_UPLOADS_BUCKET: Match.anyValue(),
+      }),
+    }),
+  });
+  template.hasResourceProperties('AWS::S3::Bucket', {
+    CorsConfiguration: {
+      CorsRules: Match.arrayWith([
+        Match.objectLike({
+          AllowedMethods: ['PUT'],
+          AllowedOrigins: ['*'],
+          ExposedHeaders: ['ETag'],
+        }),
+      ]),
+    },
+  });
+});
+
 test('consumer container has EVENTS_TABLE_NAME environment variable', () => {
   const app = new cdk.App();
   const stack = new DataProcessingInfrastructure.DataProcessingInfrastructureStack(app, 'ConsumerEnvEventsTest', defaultProps);

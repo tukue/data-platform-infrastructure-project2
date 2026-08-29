@@ -99,11 +99,15 @@ flowchart LR
 ### Ingestion and Processing
 
 - S3 raw upload bucket for incoming CSV files
+- Self-contained customer upload API with Cognito sign-up and resumable S3 multipart uploads
 - EventBridge trigger for object-created events
 - Step Functions workflow for orchestration, retries, timeout handling, and job status updates
 - ECS Fargate task for containerized processing
 - Separate S3 buckets for processed and failed outputs
 - DynamoDB job table with TTL and point-in-time recovery
+
+See [the customer upload API guide](docs/customer-upload-api.md) for the
+customer flow and deployment outputs.
 
 ### Kafka Streaming Backbone
 
@@ -345,7 +349,6 @@ This is a production-oriented reference implementation, not a fully operated pro
 - Kafka IAM permissions should be scoped to the correct cluster, topic, and group ARNs.
 - Topic creation should eventually move from consumer startup to a dedicated deployment-time provisioner.
 - CloudWatch alarms and incident routing should be added for failed workflows, consumer lag, and retry queue depth.
-- A presigned upload API would make ingestion safer than direct S3 writes.
 - End-to-end integration tests should run against a deployed test environment.
 
 ## Repository Layout
@@ -427,7 +430,6 @@ Near-term improvements:
 - scope Kafka IAM resources to exact topic and group ARNs
 - move topic creation to deployment-time provisioning
 - add CloudWatch alarms for consumer lag and workflow failures
-- add an authenticated upload API with presigned multipart upload URLs
 - add example Athena dashboards or saved queries
 
 Longer-term platform evolution:

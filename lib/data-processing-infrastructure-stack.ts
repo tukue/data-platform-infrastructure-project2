@@ -1,6 +1,8 @@
 import * as cdk from 'aws-cdk-lib';
 import * as athena from 'aws-cdk-lib/aws-athena';
+import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as cloudtrail from 'aws-cdk-lib/aws-cloudtrail';
+import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
@@ -115,6 +117,15 @@ export class DataProcessingInfrastructureStack extends cdk.Stack {
 
     const rawUploadsBucket = new s3.Bucket(this, 'RawUploadsBucket', {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      cors: [
+        {
+          allowedHeaders: ['Content-Type'],
+          allowedMethods: [s3.HttpMethods.PUT],
+          allowedOrigins: ['*'],
+          exposedHeaders: ['ETag'],
+          maxAge: 300,
+        },
+      ],
       encryption: s3.BucketEncryption.KMS,
       encryptionKey: storageKey,
       enforceSSL: true,
@@ -131,6 +142,247 @@ export class DataProcessingInfrastructureStack extends cdk.Stack {
         },
       ],
       versioned: true,
+    });
+
+    const customerUploadUserPool = new cognito.UserPool(this, 'CustomerUploadUserPool', {
+      selfSignUpEnabled: true,
+      signInAliases: { email: true },
+      autoVerify: { email: true },
+      standardAttributes: {
+        email: { required: true, mutable: false },
+      },
+      passwordPolicy: {
+        minLength: 12,
+        requireDigits: true,
+        requireLowercase: true,
+        requireSymbols: true,
+        requireUppercase: true,
+      },
+      accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    const customerUploadClient = customerUploadUserPool.addClient('CustomerUploadClient', {
+      authFlows: {
+        userPassword: true,
+        userSrp: true,
+      },
+      preventUserExistenceErrors: true,
+      generateSecret: false,
+    });
+
+    const customerUploadHandler = new lambda.Function(this, 'CustomerUploadHandler', {
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'index.handler',
+      code: lambda.Code.fromInline(`
+import json
+import os
+import re
+import uuid
+
+import boto3
+from botocore.exceptions import ClientError
+
+s3 = boto3.client("s3")
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024
+PART_SIZE_BYTES = 10 * 1024 * 1024
+PART_URL_BATCH_SIZE = 10
+MAX_PART_URL_BATCH_SIZE = 20
+UPLOAD_URL_TTL_SECONDS = 900
+FILENAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$")
+
+def response(status_code, body):
+    return {
+        "statusCode": status_code,
+        "headers": {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+        },
+        "body": json.dumps(body),
+    }
+
+def request_body(event):
+    try:
+        return json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        raise ValueError("Request body must be valid JSON.")
+
+def customer_object_key(subject, file_name):
+    return f"customer-uploads/{subject}/{uuid.uuid4()}-{file_name}"
+
+def assert_customer_object_key(subject, object_key):
+    if not isinstance(object_key, str) or not object_key.startswith(f"customer-uploads/{subject}/"):
+        raise ValueError("objectKey does not belong to the authenticated customer.")
+
+def part_urls(bucket, object_key, upload_id, part_numbers):
+    return [
+        {
+            "partNumber": part_number,
+            "url": s3.generate_presigned_url(
+                "upload_part",
+                Params={
+                    "Bucket": bucket,
+                    "Key": object_key,
+                    "UploadId": upload_id,
+                    "PartNumber": part_number,
+                },
+                ExpiresIn=UPLOAD_URL_TTL_SECONDS,
+                HttpMethod="PUT",
+            ),
+        }
+        for part_number in part_numbers
+    ]
+
+def start_upload(body, subject):
+    file_name = body.get("fileName")
+    if not isinstance(file_name, str) or not FILENAME_PATTERN.fullmatch(file_name) or not file_name.lower().endswith(".csv"):
+        raise ValueError("fileName must be a CSV name containing only letters, numbers, dots, underscores, or hyphens.")
+
+    file_size = body.get("fileSize")
+    if type(file_size) is not int or not 0 < file_size <= MAX_UPLOAD_BYTES:
+        raise ValueError("fileSize must be a positive integer no larger than 5 GiB.")
+
+    bucket = os.environ["RAW_UPLOADS_BUCKET"]
+    object_key = customer_object_key(subject, file_name)
+    multipart_upload = s3.create_multipart_upload(
+        Bucket=bucket,
+        Key=object_key,
+        ContentType="text/csv",
+    )
+    part_count = (file_size + PART_SIZE_BYTES - 1) // PART_SIZE_BYTES
+    initial_parts = range(1, min(part_count, PART_URL_BATCH_SIZE) + 1)
+
+    return {
+        "objectKey": object_key,
+        "uploadId": multipart_upload["UploadId"],
+        "partSizeBytes": PART_SIZE_BYTES,
+        "partCount": part_count,
+        "partUrls": part_urls(bucket, object_key, multipart_upload["UploadId"], initial_parts),
+        "expiresInSeconds": UPLOAD_URL_TTL_SECONDS,
+    }
+
+def refresh_part_urls(body, subject, upload_id):
+    object_key = body.get("objectKey")
+    assert_customer_object_key(subject, object_key)
+    part_numbers = body.get("partNumbers")
+    if not isinstance(part_numbers, list) or not 0 < len(part_numbers) <= MAX_PART_URL_BATCH_SIZE:
+        raise ValueError("partNumbers must contain between 1 and 20 part numbers.")
+    if any(type(part_number) is not int or not 1 <= part_number <= 10000 for part_number in part_numbers):
+        raise ValueError("partNumbers must contain integers between 1 and 10000.")
+    if len(set(part_numbers)) != len(part_numbers):
+        raise ValueError("partNumbers must not contain duplicates.")
+
+    return {
+        "partUrls": part_urls(os.environ["RAW_UPLOADS_BUCKET"], object_key, upload_id, part_numbers),
+        "expiresInSeconds": UPLOAD_URL_TTL_SECONDS,
+    }
+
+def complete_upload(body, subject, upload_id):
+    object_key = body.get("objectKey")
+    assert_customer_object_key(subject, object_key)
+    parts = body.get("parts")
+    if not isinstance(parts, list) or not parts:
+        raise ValueError("parts must be a non-empty array.")
+
+    completed_parts = []
+    for part in parts:
+        if not isinstance(part, dict) or type(part.get("partNumber")) is not int or not isinstance(part.get("etag"), str):
+            raise ValueError("Each part requires an integer partNumber and string etag.")
+        completed_parts.append({"PartNumber": part["partNumber"], "ETag": part["etag"]})
+    if len({part["PartNumber"] for part in completed_parts}) != len(completed_parts):
+        raise ValueError("parts must not contain duplicate part numbers.")
+
+    s3.complete_multipart_upload(
+        Bucket=os.environ["RAW_UPLOADS_BUCKET"],
+        Key=object_key,
+        UploadId=upload_id,
+        MultipartUpload={"Parts": sorted(completed_parts, key=lambda part: part["PartNumber"])},
+    )
+    return {"objectKey": object_key, "status": "accepted"}
+
+def handler(event, _context):
+    try:
+        body = request_body(event)
+        subject = event["requestContext"]["authorizer"]["claims"]["sub"]
+        upload_id = event.get("pathParameters", {}).get("uploadId")
+        resource = event.get("resource", "")
+
+        if upload_id and resource.endswith("/parts"):
+            return response(200, refresh_part_urls(body, subject, upload_id))
+        if upload_id and resource.endswith("/complete"):
+            return response(200, complete_upload(body, subject, upload_id))
+        if not upload_id:
+            return response(201, start_upload(body, subject))
+        return response(404, {"message": "Upload endpoint not found."})
+    except ValueError as error:
+        return response(400, {"message": str(error)})
+    except ClientError:
+        return response(400, {"message": "Upload request could not be completed."})
+`),
+      environment: {
+        RAW_UPLOADS_BUCKET: rawUploadsBucket.bucketName,
+      },
+      memorySize: 256,
+      timeout: cdk.Duration.seconds(10),
+      tracing: lambda.Tracing.ACTIVE,
+    });
+    rawUploadsBucket.grantPut(customerUploadHandler);
+
+    const customerUploadApiLogGroup = new logs.LogGroup(this, 'CustomerUploadApiLogGroup', {
+      encryptionKey: operationalKey,
+      retention: logRetention,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    const customerUploadApi = new apigateway.RestApi(this, 'CustomerUploadApi', {
+      deployOptions: {
+        accessLogDestination: new apigateway.LogGroupLogDestination(customerUploadApiLogGroup),
+        accessLogFormat: apigateway.AccessLogFormat.jsonWithStandardFields({
+          httpMethod: true,
+          ip: true,
+          protocol: true,
+          requestTime: true,
+          resourcePath: true,
+          responseLength: true,
+          status: true,
+        }),
+        loggingLevel: apigateway.MethodLoggingLevel.ERROR,
+        metricsEnabled: true,
+        tracingEnabled: true,
+      },
+      description: 'Authenticated customer endpoint for multipart CSV uploads.',
+      endpointTypes: [apigateway.EndpointType.REGIONAL],
+    });
+
+    const customerUploadAuthorizer = new apigateway.CognitoUserPoolsAuthorizer(this, 'CustomerUploadAuthorizer', {
+      cognitoUserPools: [customerUploadUserPool],
+    });
+    const uploadsResource = customerUploadApi.root.addResource('uploads');
+    uploadsResource.addCorsPreflight({
+      allowHeaders: ['Authorization', 'Content-Type'],
+      allowMethods: ['POST'],
+      allowOrigins: apigateway.Cors.ALL_ORIGINS,
+    });
+    const uploadMethodOptions = {
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+      authorizer: customerUploadAuthorizer,
+    };
+    uploadsResource.addMethod('POST', new apigateway.LambdaIntegration(customerUploadHandler), uploadMethodOptions);
+    const uploadIdResource = uploadsResource.addResource('{uploadId}');
+    uploadIdResource.addResource('parts').addMethod('POST', new apigateway.LambdaIntegration(customerUploadHandler), uploadMethodOptions);
+    uploadIdResource.addResource('complete').addMethod('POST', new apigateway.LambdaIntegration(customerUploadHandler), uploadMethodOptions);
+
+    new cdk.CfnOutput(this, 'CustomerUploadApiUrl', {
+      value: customerUploadApi.url,
+      description: 'Authenticated customer endpoint for multipart CSV uploads.',
+    });
+    new cdk.CfnOutput(this, 'CustomerUploadUserPoolId', {
+      value: customerUploadUserPool.userPoolId,
+      description: 'Cognito user pool for customer upload accounts.',
+    });
+    new cdk.CfnOutput(this, 'CustomerUploadClientId', {
+      value: customerUploadClient.userPoolClientId,
+      description: 'Cognito app client for customer upload authentication.',
     });
 
     const processedFilesBucket = new s3.Bucket(this, 'ProcessedFilesBucket', {
