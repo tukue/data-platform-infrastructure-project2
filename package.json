@@ -39,7 +39,7 @@
     "@types/jest": "^30",
     "@types/node": "^24.10.1",
     "aws-cdk": "2.1122.0",
-    "cdk-nag": "^2.38.2",
+    "cdk-nag": "^3.0.2",
     "jest": "^30",
     "jsonschema": "^1.4.1",
     "ts-jest": "^29",
